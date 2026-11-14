@@ -41,7 +41,12 @@ def sqlite_lib():
 
 
 def raw_db(path, sql):
-    """Create a db with 80 reserved bytes/page using the C API (python sqlite3 can't do it)."""
+    """Create a db with 80 reserved bytes/page using the C API (python sqlite3 can't do it).
+
+    Note: on Windows, python's sqlite3.dll crashes in sqlite3_open unless the library has been
+    initialized first (importing the sqlite3 module does that)."""
+    import sqlite3
+    sqlite3.connect(':memory:').close()   # ensure sqlite3_initialize on every platform
     lib = sqlite_lib()
     db = ctypes.c_void_p()
     lib.sqlite3_open.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
