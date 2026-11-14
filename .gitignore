@@ -4,3 +4,13 @@ content/vendor/
 __pycache__/
 *.pyc
 .DS_Store
+
+# never commit local secrets / runtime data
+keys.json
+pass.bin
+apikeys.json
+brief.db*
+imgkey.json
+token
+.wxbrief/
+tests/.synth/

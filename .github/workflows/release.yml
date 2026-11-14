@@ -1,0 +1,35 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: desktop zip (Windows + macOS, Python 3.10+)
+        run: |
+          set -e
+          mkdir -p dist
+          zip -r dist/wxbrief-desktop.zip content/*.py run-mac.command run-windows.bat README.md LICENSE icon.png
+
+      - name: lazycat lpk
+        run: |
+          set -e
+          sudo apt-get update -qq && sudo apt-get install -y -qq unzip
+          npm install -g @lazycatcloud/lzc-cli
+          lzc-cli project build
+
+      - name: upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/wxbrief-desktop.zip
+            dist/*.lpk
+          generate_release_notes: true

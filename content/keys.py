@@ -1,36 +1,45 @@
-"""WeChat 4.1+ database keys: verify the saved passphrase, derive per-DB keys, and re-capture
-the passphrase at the next WeChat login when the saved one stops working.
+"""WeChat 4.x database keys: verify saved keys, and capture new ones when they stop working.
 
-Capture method (gdb breakpoint on the WCDB cipher-config function, located by ELF static analysis)
-follows TANGandXUE/wcdb-key-tool (MIT). Runtime address is computed from the PT_LOAD segment that
-holds the function, not from the r-x mapping start.
+Two capture paths, picked by runtime:
+- Lazycat container: gdb breakpoint on the WCDB cipher-config function (located by ELF static
+  analysis), which yields the account passphrase; per-DB keys are derived from it (PBKDF2).
+  Follows TANGandXUE/wcdb-key-tool (MIT).
+- Windows / macOS: scan the running WeChat process's memory for WCDB's cached per-DB keys
+  (see memscan.py). Windows needs no admin rights; macOS re-execs this file under sudo.
+
+Saved state (VAR dir, mode 600): pass.bin (passphrase, gdb path only) and keys.json
+(salt -> [raw key hexes], each verified against the db's first page before use).
 """
-import hashlib, json, os, re, struct, subprocess, threading, time
-import wxdb
+import glob, hashlib, json, os, re, struct, subprocess, sys, threading, time
+import runenv, wxdb
 
-VAR = os.environ.get('VAR', '/lzcapp/var')
+VAR = runenv.var_dir()
 PASS = VAR + '/pass.bin'
 KEYS = VAR + '/keys.json'
 WECHAT_EXE = '/lzcapp/var/apps/wechat/opt/wechat/wechat'  # path as seen inside the cloud WeChat container
+USE_GDB = runenv.LAZYCAT
 
 ANCHOR = b'com.Tencent.WCDB.Config.Cipher'
 LEA_RSI, LEA_RDI, FUNC_HEAD = b'\x48\x8d\x35', b'\x48\x8d\x3d', b'\x55\x41\x57'
 
 
 class Keys:
-    def __init__(self, log):
+    def __init__(self, log, account_dir=None):
         self.log = log
+        self.account_dir = account_dir or (lambda: None)
         self.lock = threading.Lock()
         self.cache = {}
         try:
-            self.cache = json.load(open(KEYS))
+            raw = json.load(open(KEYS))
+            self.cache = {s: [k] if isinstance(k, str) else k for s, k in raw.items()}
         except Exception:
             pass
         self.passphrase = open(PASS, 'rb').read() if os.path.exists(PASS) else None
-        self.state = 'ok' if self.passphrase else 'need_login'
+        self.state = 'ok' if (self.passphrase or self.cache) else 'need_login'
         self.capturing = False
         self.capture_note = ''
         self.gdb = None
+        self.scan_proc = None
 
     def key_for(self, path):
         """Return the AES key for a DB file, or None (and start capture) if it can't be opened."""
@@ -40,14 +49,14 @@ class Keys:
             return None
         salt = page[:16].hex()
         with self.lock:
-            k = self.cache.get(salt)
-            if k and wxdb.key_ok(bytes.fromhex(k), page):
-                return bytes.fromhex(k)
+            for k in self.cache.get(salt, []):
+                if wxdb.key_ok(bytes.fromhex(k), page):
+                    return bytes.fromhex(k)
             if self.passphrase:
                 k = wxdb.derive(self.passphrase, page[:16])
                 if wxdb.key_ok(k, page):
-                    self.cache[salt] = k.hex()
-                    _write(KEYS, json.dumps(self.cache).encode())
+                    self.cache[salt] = [k.hex()]
+                    _write(KEYS, json.dumps(self.cache))
                     self.state = 'ok'
                     return k
         self.state = 'need_login'
@@ -81,52 +90,169 @@ class Keys:
         threading.Thread(target=self._capture_loop, args=(probe_db,), daemon=True).start()
 
     def _capture_loop(self, probe_db):
+        try:
+            if USE_GDB:
+                self._gdb_loop(probe_db)
+            else:
+                self._memscan_loop(probe_db)
+        finally:
+            self.capturing = False
+
+    # ----- memory scan (Windows / macOS) -----
+    def _wanted_salts(self):
+        """salt -> first page, for the account's contact/message/media databases."""
+        acc = self.account_dir()
+        if not acc:
+            return {}
+        out = {}
+        for pat in ('db_storage/contact/contact.db', 'db_storage/message/message_[0-9]*.db',
+                    'db_storage/message/media_[0-9]*.db'):
+            for p in glob.glob(acc + '/' + pat):
+                try:
+                    page = open(p, 'rb').read(wxdb.PS)
+                except OSError:
+                    continue
+                if len(page) == wxdb.PS:
+                    out[page[:16].hex()] = page
+        return out
+
+    def _memscan_loop(self, probe_db):
+        import memscan
+        self.log('key: no usable saved key; will scan WeChat process memory for the db keys')
+        page = open(probe_db, 'rb').read(wxdb.PS)
+        want_salt = page[:16].hex()
+        try:
+            while True:
+                salt_pages = self._wanted_salts()
+                pids = memscan.find_pids()
+                if not pids:
+                    self.capture_note = '微信没有在运行：请打开微信并登录，会自动完成取密钥'
+                    time.sleep(15)
+                    continue
+                self.capture_note = f'正在扫描微信进程（pid {" ".join(map(str, pids))}）的内存'
+                try:
+                    found = self._scan_pids(pids, salt_pages)
+                except Exception as e:
+                    self.capture_note = f'内存扫描失败：{e}'
+                    self.log('key:', self.capture_note)
+                    time.sleep(30)
+                    continue
+                keys = found.get(want_salt)
+                if not keys:
+                    self.capture_note = '微信在运行但还没找到密钥（可能未登录完成），继续重试'
+                    time.sleep(15)
+                    continue
+                with self.lock:
+                    for s, ks in found.items():
+                        ok = [k for k in ks if s not in salt_pages or
+                              wxdb.key_ok(bytes.fromhex(k), salt_pages[s])]
+                        if ok:
+                            self.cache[s] = ok
+                    _write(KEYS, json.dumps(self.cache))
+                    self.state = 'ok'
+                self.capture_note = 'captured'
+                self.log('key: db keys captured from memory and verified')
+                return
+        finally:
+            self._kill_scan()
+
+    def _kill_scan(self):
+        pr = self.scan_proc
+        if pr and pr.poll() is None:
+            try:
+                pr.terminate()
+            except Exception:
+                pass
+        self.scan_proc = None
+
+    def _scan_pids(self, pids, salt_pages):
+        import memscan
+        if sys.platform == 'darwin':
+            return self._scan_sudo(pids, salt_pages)
+        hexes = []
+        for pid in pids:
+            self.log('key: scanning memory of pid', pid)
+            try:
+                hexes += list(memscan.scan_pid(pid))
+            except OSError as e:
+                self.log('key: pid', pid, e)
+        return memscan.extract(hexes, salt_pages)[0]
+
+    def _scan_sudo(self, pids, salt_pages):
+        """macOS: root is required for task_for_pid; run this file under sudo as a helper."""
+        import memscan
+        found = {}
+        for pid in pids:
+            cmd = ['sudo', sys.executable, os.path.abspath(__file__), '--scan-mem', str(pid)]
+            self.log('key: sudo memory scan for pid', pid)
+            pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.scan_proc = pr
+            hexes = []
+            try:
+                for line in pr.stdout:
+                    p = line.split(maxsplit=1)
+                    if len(p) == 2 and p[0] == 'M':
+                        hexes.append(p[1].strip())
+                    elif p and p[0] == 'E':
+                        self.log('key: helper:', line.strip())
+                pr.wait()
+            finally:
+                if pr.poll() is None:
+                    pr.terminate()
+            if pr.returncode != 0 and not hexes:
+                err = (pr.stderr.read() if pr.stderr else '')[-200:]
+                if 'a terminal is required' in err or 'askpass' in err:
+                    raise RuntimeError('需要 sudo 输密码：请在「终端」里启动本程序后再试一次')
+                if pr.returncode:
+                    raise RuntimeError(f'sudo 扫描失败（exit {pr.returncode}）：{err}'.strip())
+            found.update(memscan.extract(hexes, salt_pages)[0])
+        return found
+
+    # ----- gdb hook (Lazycat cloud WeChat) -----
+    def _gdb_loop(self, probe_db):
         self.log('key: saved passphrase does not open the databases; waiting for a WeChat re-login to capture a new one')
         page = open(probe_db, 'rb').read(wxdb.PS)
         tried = set()
-        try:
-            while True:
-                pid = find_wechat_pid()
-                if not pid:
-                    self.capture_note = 'WeChat is not running'
-                    time.sleep(5)
+        while True:
+            pid = find_wechat_pid()
+            if not pid:
+                self.capture_note = 'WeChat is not running'
+                time.sleep(5)
+                continue
+            try:
+                addr = hook_address(pid)
+            except Exception as e:
+                self.capture_note = f'cannot locate hook: {e}'
+                self.log('key:', self.capture_note)
+                time.sleep(60)
+                continue
+            self.capture_note = f'attached to WeChat pid {pid}, waiting for login'
+            self.log('key:', self.capture_note, hex(addr))
+            script = GDB_SCRIPT.replace('ADDR', hex(addr))
+            sp = '/tmp/wx_cap.gdb'
+            open(sp, 'w').write(script)
+            pr = subprocess.Popen(['gdb', '-q', '--nx', '-batch', '-p', str(pid), '-x', sp],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.gdb = pr
+            for line in pr.stdout:
+                m = re.match(r'CAND=([0-9a-f]{64})', line)
+                if not m or m.group(1) in tried:
                     continue
-                try:
-                    addr = hook_address(pid)
-                except Exception as e:
-                    self.capture_note = f'cannot locate hook: {e}'
-                    self.log('key:', self.capture_note)
-                    time.sleep(60)
-                    continue
-                self.capture_note = f'attached to WeChat pid {pid}, waiting for login'
-                self.log('key:', self.capture_note, hex(addr))
-                script = GDB_SCRIPT.replace('ADDR', hex(addr))
-                sp = '/tmp/wx_cap.gdb'
-                open(sp, 'w').write(script)
-                pr = subprocess.Popen(['gdb', '-q', '--nx', '-batch', '-p', str(pid), '-x', sp],
-                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                self.gdb = pr
-                for line in pr.stdout:
-                    m = re.match(r'CAND=([0-9a-f]{64})', line)
-                    if not m or m.group(1) in tried:
-                        continue
-                    tried.add(m.group(1))
-                    cand = bytes.fromhex(m.group(1))
-                    if wxdb.key_ok(wxdb.derive(cand, page[:16]), page):
-                        self.release()
-                        with self.lock:
-                            self.passphrase = cand
-                            self.cache = {}
-                            _write(PASS, cand)
-                            _write(KEYS, b'{}')
-                            self.state = 'ok'
-                        self.capture_note = 'captured'
-                        self.log('key: new passphrase captured and verified')
-                        return
-                pr.wait()
-                time.sleep(2)
-        finally:
-            self.capturing = False
+                tried.add(m.group(1))
+                cand = bytes.fromhex(m.group(1))
+                if wxdb.key_ok(wxdb.derive(cand, page[:16]), page):
+                    self.release()
+                    with self.lock:
+                        self.passphrase = cand
+                        self.cache = {}
+                        _write(PASS, cand)
+                        _write(KEYS, b'{}')
+                        self.state = 'ok'
+                    self.capture_note = 'captured'
+                    self.log('key: new passphrase captured and verified')
+                    return
+            pr.wait()
+            time.sleep(2)
 
 
 GDB_SCRIPT = '''python
@@ -257,3 +383,9 @@ def hook_address(pid):
                         raise RuntimeError('hook bytes mismatch')
                 return addr
     raise RuntimeError('hook not mapped')
+
+
+if __name__ == '__main__':
+    if len(sys.argv) >= 3 and sys.argv[1] == '--scan-mem':
+        import memscan
+        memscan.helper_main(sys.argv[2:])

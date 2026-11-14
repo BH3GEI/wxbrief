@@ -1,25 +1,8 @@
-"""Read-only access to WeChat 4.x (Linux) SQLCipher4 databases: decrypt db + WAL into a plain SQLite copy."""
-import ctypes, ctypes.util, hashlib, hmac, os, struct
+"""Read-only access to WeChat 4.x SQLCipher4 databases: decrypt db + WAL into a plain SQLite copy."""
+import hashlib, hmac, os, struct
+from crypto import AES
 
 PS, RES = 4096, 80
-_L = ctypes.CDLL(ctypes.util.find_library('crypto') or 'libcrypto.so.3')
-_L.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
-_L.EVP_aes_256_cbc.restype = ctypes.c_void_p
-_L.EVP_DecryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
-_L.EVP_CIPHER_CTX_set_padding.argtypes = [ctypes.c_void_p, ctypes.c_int]
-_L.EVP_DecryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int), ctypes.c_char_p, ctypes.c_int]
-_L.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
-
-def _aes(key, iv, data):
-    c = _L.EVP_CIPHER_CTX_new()
-    try:
-        _L.EVP_DecryptInit_ex(c, _L.EVP_aes_256_cbc(), None, key, iv)
-        _L.EVP_CIPHER_CTX_set_padding(c, 0)
-        out = ctypes.create_string_buffer(len(data) + 32); n = ctypes.c_int()
-        _L.EVP_DecryptUpdate(c, out, ctypes.byref(n), data, len(data))
-        return out.raw[:n.value]
-    finally:
-        _L.EVP_CIPHER_CTX_free(c)
 
 def derive(passphrase, salt):
     return hashlib.pbkdf2_hmac('sha512', passphrase, salt, 256000, 32)
@@ -31,7 +14,7 @@ def key_ok(key, page1):
 
 def _dec_page(key, pg, pgno):
     off = 16 if pgno == 1 else 0
-    plain = _aes(key, pg[PS - RES:PS - RES + 16], pg[off:PS - RES])
+    plain = AES.cbc(key, pg[PS - RES:PS - RES + 16], pg[off:PS - RES])
     return (b'SQLite format 3\x00' if pgno == 1 else b'') + plain + b'\x00' * RES
 
 def decrypt_to(src, key, dst):
@@ -66,19 +49,73 @@ def decrypt_to(src, key, dst):
     return n
 
 _Z = None
+_ZERR = ''
+def _zstd():
+    """Return (mode, obj). stdlib compression.zstd (3.14+) > pip zstandard > libzstd via ctypes."""
+    global _Z, _ZERR
+    if _Z is not None:
+        return _Z
+    try:
+        from compression import zstd
+        _Z = ('std', zstd)
+        return _Z
+    except ImportError:
+        pass
+    try:
+        import zstandard
+        _Z = ('pip', zstandard.ZstdDecompressor())
+        return _Z
+    except ImportError:
+        pass
+    import ctypes, ctypes.util, sys
+    names = []
+    if sys.platform == 'darwin':
+        names += ['/opt/homebrew/opt/zstd/lib/libzstd.dylib', '/usr/local/opt/zstd/lib/libzstd.dylib']
+    elif sys.platform == 'win32':
+        base = getattr(sys, 'base_prefix', sys.prefix)
+        names += [os.path.join(base, 'DLLs', 'libzstd.dll'), 'libzstd.dll']
+    else:
+        found = ctypes.util.find_library('zstd')
+        if found:
+            names.append(found)
+        names += ['libzstd.so.1', 'libzstd']
+    for n in names:
+        try:
+            L = ctypes.CDLL(n)
+            L.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
+            L.ZSTD_getFrameContentSize.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+            L.ZSTD_decompress.restype = ctypes.c_size_t
+            L.ZSTD_decompress.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t]
+            _Z = ('ctypes', L)
+            return _Z
+        except OSError:
+            continue
+    _ZERR = 'zstd 不可用：请 pip install zstandard'
+    _Z = ('none', None)
+    return _Z
+
+def zstd_ok():
+    return _zstd()[0] != 'none'
+
 def unzstd(b):
-    global _Z
     if not isinstance(b, (bytes, bytearray)) or b[:4] != b'\x28\xb5\x2f\xfd':
         return b
-    if _Z is None:
-        _Z = ctypes.CDLL(ctypes.util.find_library('zstd') or 'libzstd.so.1')
-        _Z.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
-        _Z.ZSTD_getFrameContentSize.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
-        _Z.ZSTD_decompress.restype = ctypes.c_size_t
-        _Z.ZSTD_decompress.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t]
-    size = _Z.ZSTD_getFrameContentSize(bytes(b), len(b))
+    mode, z = _zstd()
+    if mode == 'none':
+        return b
+    if mode == 'std':
+        try:
+            return z.ZstdDecompressor().decompress(b)
+        except Exception:
+            return b
+    if mode == 'pip':
+        try:
+            return z.decompress(b)
+        except Exception:
+            return b
+    size = z.ZSTD_getFrameContentSize(bytes(b), len(b))
     if size >= (1 << 62):
         size = len(b) * 20
     out = ctypes.create_string_buffer(size)
-    r = _Z.ZSTD_decompress(out, size, bytes(b), len(b))
+    r = z.ZSTD_decompress(out, size, bytes(b), len(b))
     return out.raw[:r] if r < (1 << 62) else b

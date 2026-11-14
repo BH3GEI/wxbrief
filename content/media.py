@@ -1,6 +1,6 @@
 """Find and decode the original media behind a stored message (images, videos, files). Read-only.
 
-WeChat 4.x keeps media next to the databases:
+WeChat 4.x keeps media next to the databases (all platforms share the xwechat_files layout):
   images  msg/attach/<md5(chat)>/<YYYY-MM>/Img/<hash>{,_h,_t}.dat   (encrypted .dat, see decode_dat)
   videos  msg/video/<YYYY-MM>/<hash>.mp4 and <hash>_thumb.jpg      (plain)
   files   msg/file/<YYYY-MM>/<title>                               (plain)
@@ -17,38 +17,18 @@ import ctypes, ctypes.util, glob, hashlib, json, os, re, struct, subprocess, thr
 import multiprocessing as mp
 from collections import Counter
 
-VAR = os.environ.get('VAR', '/lzcapp/var')
-CACHE = os.environ.get('CACHE', '/lzcapp/cache') + '/media'
+from crypto import AES
+import runenv
+
+VAR = runenv.var_dir()
+CACHE = runenv.cache_dir(VAR)
 IMGKEY = VAR + '/imgkey.json'
 SIG_V1, SIG_V2 = b'\x07\x08V1\x08\x07', b'\x07\x08V2\x08\x07'
 V1KEY = b'cfcd208495d565ef'
 PAD = b'\x10' * 16
 
-_L = None
-def _lib():
-    global _L
-    if _L is None:
-        L = ctypes.CDLL(ctypes.util.find_library('crypto') or 'libcrypto.so.3')
-        L.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
-        L.EVP_aes_128_ecb.restype = ctypes.c_void_p
-        L.EVP_DecryptInit_ex.argtypes = [ctypes.c_void_p] * 3 + [ctypes.c_char_p] * 2
-        L.EVP_CIPHER_CTX_set_padding.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        L.EVP_DecryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int),
-                                        ctypes.c_char_p, ctypes.c_int]
-        L.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
-        _L = L
-    return _L
-
 def aes_ecb(key, data):
-    L = _lib(); c = L.EVP_CIPHER_CTX_new()
-    try:
-        L.EVP_DecryptInit_ex(c, L.EVP_aes_128_ecb(), None, key, None)
-        L.EVP_CIPHER_CTX_set_padding(c, 0)
-        out = ctypes.create_string_buffer(len(data) + 16); n = ctypes.c_int()
-        L.EVP_DecryptUpdate(c, out, ctypes.byref(n), data, len(data))
-        return out.raw[:n.value]
-    finally:
-        L.EVP_CIPHER_CTX_free(c)
+    return AES.ecb(key, data)
 
 
 # ---------------- message -> resource reference ----------------
@@ -189,7 +169,7 @@ def decode_dat(b, ik):
     return None
 
 def wxgf_to_jpeg(d, cache_name):
-    """WeChat's HEVC wrapper -> JPEG via ffmpeg, cached."""
+    """WeChat's HEVC wrapper -> JPEG via ffmpeg (optional), cached."""
     path = f'{CACHE}/{cache_name}.jpg'
     if os.path.exists(path):
         return open(path, 'rb').read()
@@ -199,8 +179,8 @@ def wxgf_to_jpeg(d, cache_name):
     try:
         r = subprocess.run(['ffmpeg', '-v', 'error', '-f', 'hevc', '-i', '-', '-frames:v', '1', '-q:v', '3',
                             '-f', 'image2', '-c:v', 'mjpeg', '-'], input=d[i:], capture_output=True, timeout=60)
-    except Exception:
-        return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None   # ffmpeg not installed
     if r.returncode != 0 or r.stdout[:3] != b'\xff\xd8\xff':
         return None
     os.makedirs(CACHE, exist_ok=True)
@@ -226,7 +206,7 @@ def _safe_name(title):
     return n if n and n not in ('.', '..') else None
 
 def availability(acc, chat, res):
-    """'full', 'thumb' or None (original not downloaded by the cloud WeChat)."""
+    """'full', 'thumb' or None (original not downloaded by this WeChat)."""
     if not acc or not res:
         return None
     kind, _, ref = res.partition(':')
@@ -250,7 +230,7 @@ def fetch(acc, chat, res, ik, thumb=False):
     if kind == 'img':
         files = _img_files(acc, chat, ref, thumb)
         if not files:
-            return None, '原图未下载到云微信', None, None
+            return None, '原图未下载到微信', None, None
         if ik.state != 'ok':
             return None, f'图片密钥未就绪（{ik.state}）', None, None
         for s, p in files:
@@ -272,18 +252,18 @@ def fetch(acc, chat, res, ik, thumb=False):
             p = _first(f'{acc}/msg/video/*/{ref}.mp4')
             if p:
                 return 'path', p, 'video/mp4', ref + '.mp4'
-            return None, '视频未下载到云微信（只有封面，加 ?thumb=1 取封面）', None, None
+            return None, '视频未下载到微信（只有封面，加 ?thumb=1 取封面）', None, None
         p = _first(f'{acc}/msg/video/*/{ref}_thumb.jpg')
         if p:
             with open(p, 'rb') as f:
                 d = f.read()
             return 'bytes', d, sniff(d) or 'image/jpeg', ref + '_thumb.jpg'
-        return None, '视频未下载到云微信', None, None
+        return None, '视频未下载到微信', None, None
     if kind == 'file':
         n = _safe_name(ref)
         p = n and _first(f'{acc}/msg/file/*/{glob.escape(n)}')
         if not p or not os.path.realpath(p).startswith(os.path.realpath(acc + '/msg/file') + '/'):
-            return None, '文件未下载到云微信', None, None
+            return None, '文件未下载到微信', None, None
         import mimetypes
         return 'path', p, mimetypes.guess_type(n)[0] or 'application/octet-stream', n
     return None, 'no media', None, None
