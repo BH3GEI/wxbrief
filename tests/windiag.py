@@ -1,20 +1,17 @@
-import ctypes, os, sys
-p = os.path.join(sys.base_prefix, 'DLLs', 'sqlite3.dll')
-lib = ctypes.CDLL(p)
-lib.sqlite3_libversion.restype = ctypes.c_char_p
-print('version:', lib.sqlite3_libversion())
-# no argtypes at all
-db = ctypes.c_void_p()
+import ctypes, os, sys, sqlite3
+c = sqlite3.connect(':memory:')
+print('python sqlite3 works:', c.execute('select sqlite_version()').fetchone())
+lib = ctypes.CDLL(os.path.join(sys.base_prefix, 'DLLs', 'sqlite3.dll'))
+print('libversion_number:', lib.sqlite3_libversion_number())
+print('threadsafe:', lib.sqlite3_threadsafe())
+db = ctypes.c_void_p(12345)
+buf = (ctypes.c_char * 16)()
+print('buffer addr:', ctypes.addressof(buf))
+# use a preallocated pointer-sized buffer as ppDb
+import struct
+ptrbuf = ctypes.create_string_buffer(8)
 try:
-    rc = lib.sqlite3_open(b':memory:', ctypes.byref(db))
-    print('no-argtypes open rc:', rc, db.value)
+    rc = lib.sqlite3_open(b':memory:', ptrbuf)
+    print('open with char buffer rc:', rc, 'handle:', struct.unpack('P', ptrbuf.raw)[0])
 except OSError as e:
-    print('no-argtypes failed:', e)
-# try open_v2 with explicit types
-lib.sqlite3_open_v2.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.c_char_p]
-db2 = ctypes.c_void_p()
-try:
-    rc = lib.sqlite3_open_v2(b':memory:', ctypes.byref(db2), 2, None)
-    print('open_v2 rc:', rc, db2.value)
-except OSError as e:
-    print('open_v2 failed:', e)
+    print('char buffer failed:', e)
