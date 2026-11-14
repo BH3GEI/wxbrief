@@ -17,6 +17,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: windows sqlite diag
+        if: runner.os == 'Windows'
+        run: python tests/windiag.py
       - name: synthetic end-to-end test
         run: python tests/synthtest.py
       - name: memory scan test
