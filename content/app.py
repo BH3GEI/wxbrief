@@ -389,7 +389,7 @@ input{width:100%;font:inherit;color:inherit;background:none;border:1px solid var
 .key{padding:14px 0;border-bottom:1px solid var(--line)}.key h4{margin:0 0 2px}
 textarea{width:100%;font:13px/1.45 ui-monospace,Menlo,monospace;color:inherit;background:none;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:6px;resize:vertical}
 button{font:inherit;font-size:14px;color:var(--fg);background:none;border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:4px 6px 0 0;cursor:pointer}
-button.pri{background:var(--acc);border-color:var(--acc);color:var(--bg)}button.del{color:var(--warn)}.inline{display:inline}.na{color:var(--mute);font-size:13px}code{word-break:break-all;font-size:13px}
+button.armed{border-color:var(--warn);color:var(--warn);font-weight:600}button.pri{background:var(--acc);border-color:var(--acc);color:var(--bg)}button.del{color:var(--warn)}.inline{display:inline}.na{color:var(--mute);font-size:13px}code{word-break:break-all;font-size:13px}
 """
 
 def page(title, body):
@@ -485,10 +485,17 @@ def base_url(handler):
     host = handler.headers.get('X-Forwarded-Host') or handler.headers.get('Host') or 'brief'
     return 'https://' + host.split(',')[0].strip()
 
-KEYS_JS = """<script>function cp(b,only){var d=b.parentNode,t=only?b.dataset.k:d.querySelector('textarea').value,o=b.textContent;
-function done(){b.textContent='已复制';setTimeout(function(){b.textContent=o},1500)}
-if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done)}
-else{var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();document.execCommand('copy');a.remove();done()}}</script>"""
+# No confirm()/alert(): the Lazycat client's webview silently suppresses native dialogs.
+KEYS_JS = """<script>
+function cp(b,only){var d=b.parentNode,t=only?b.dataset.k:d.querySelector('textarea').value,o=b.textContent;
+ function done(ok){b.textContent=ok?'已复制':'复制失败，请长按文本框手动复制';setTimeout(function(){b.textContent=o},2000)}
+ function old(){var a=document.createElement('textarea');a.value=t;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';
+  document.body.appendChild(a);a.select();a.setSelectionRange(0,t.length);var ok=false;try{ok=document.execCommand('copy')}catch(e){}a.remove();done(ok)}
+ if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(function(){done(true)},old)}else{old()}}
+document.querySelectorAll('form.two').forEach(function(f){var b=f.querySelector('button'),o=b.textContent,tm;
+ f.addEventListener('submit',function(ev){if(f.dataset.armed){return}ev.preventDefault();f.dataset.armed='1';b.textContent=b.dataset.ask;b.classList.add('armed');
+  clearTimeout(tm);tm=setTimeout(function(){delete f.dataset.armed;b.textContent=o;b.classList.remove('armed')},5000)})});
+</script>"""
 
 def keys_page(base, new_id=None):
     e = html.escape
@@ -504,12 +511,10 @@ def keys_page(base, new_id=None):
             f'<textarea rows="7" readonly{" autofocus" if new else ""}>{e(agent_line(base, k["key"]))}</textarea>'
             f'<button class="pri" type="button" onclick="cp(this,0)">复制给 agent 的说明</button>'
             f'<button type="button" onclick="cp(this,1)" data-k="{e(k["key"])}">只复制 key</button>'
-            f'<form class="inline" method="post" action="/keys/reset" '
-            f'onsubmit="return confirm(&quot;重置「{e(k["name"])}」？会生成新 key，旧 key 立刻失效，需要把新说明重新发给 agent。&quot;)">'
-            f'<input type="hidden" name="id" value="{k["id"]}"><button>重置</button></form>'
-            f'<form class="inline" method="post" action="/keys/revoke" '
-            f'onsubmit="return confirm(&quot;吊销「{e(k["name"])}」？用它的 agent 会立刻失去访问。&quot;)">'
-            f'<input type="hidden" name="id" value="{k["id"]}"><button class="del">吊销</button></form></div>')
+            f'<form class="inline two" method="post" action="/keys/reset">'
+            f'<input type="hidden" name="id" value="{k["id"]}"><button data-ask="再点一次：换新 key，旧的立刻失效">重置</button></form>'
+            f'<form class="inline two" method="post" action="/keys/revoke">'
+            f'<input type="hidden" name="id" value="{k["id"]}"><button class="del" data-ask="再点一次：确认吊销">吊销</button></form></div>')
     if not keys:
         out.append('<p class="sub">还没有 key。</p>')
     out.append('<h4 style="margin-top:24px">新建 key</h4><form method="post" action="/keys/create">'
@@ -623,9 +628,11 @@ def make_handler(K):
                 # Key management is web-only (behind the Lazycat login); /api/ is the public path and stays read-only.
                 if u.path not in ('/keys/create', '/keys/revoke', '/keys/reset'):
                     return self.send('not found', 404, 'text/plain')
+                # CSRF guard. Some webviews send neither header; the Lazycat login cookie is what really gates this.
                 origin = self.headers.get('Origin') or self.headers.get('Referer') or ''
-                if urlparse(origin).netloc != urlparse(base_url(self)).netloc:
-                    return self.send('bad origin', 403, 'text/plain')
+                if origin and origin != 'null' and urlparse(origin).netloc != urlparse(base_url(self)).netloc:
+                    log('apikey: rejected POST from', origin[:80])
+                    return self.send(page('出错了', '<p>请求来源不对，请从本页面操作。</p><p><a class="file" href="/keys">← 回到 key 管理</a></p>'), 403)
                 n = min(int(self.headers.get('Content-Length') or 0), 4096)
                 f = parse_qs(self.rfile.read(n).decode('utf-8', 'replace'))
                 if u.path == '/keys/create':
