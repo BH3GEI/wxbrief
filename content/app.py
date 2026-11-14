@@ -384,6 +384,8 @@ main{max-width:640px;margin:0 auto;padding:12px 16px 40px}a{color:inherit;text-d
 input{width:100%;font:inherit;color:inherit;background:none;border:1px solid var(--line);border-radius:8px;padding:10px;margin:8px 0}
 .err{color:var(--warn);padding:8px 0}.pic{display:block;margin-top:4px}.pic img{max-width:60%;max-height:240px;border-radius:6px}
 .file{color:var(--acc)}
+.top{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 0}
+.btn{font-size:14px;color:var(--acc);border:1px solid var(--acc);border-radius:8px;padding:5px 10px;white-space:nowrap}
 .key{padding:14px 0;border-bottom:1px solid var(--line)}.key h4{margin:0 0 2px}
 textarea{width:100%;font:13px/1.45 ui-monospace,Menlo,monospace;color:inherit;background:none;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:6px;resize:vertical}
 button{font:inherit;font-size:14px;color:var(--fg);background:none;border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:4px 6px 0 0;cursor:pointer}
@@ -399,7 +401,8 @@ def fmt(ts):
 
 def home(K, q):
     s = q.get('q', [''])[0]
-    out = [f'<form><input name="q" value="{html.escape(s)}" placeholder="搜会话或消息"></form>']
+    out = ['<div class="top"><b>消息简报</b><a class="btn" href="/keys">API key · 给 agent 的说明</a></div>',
+           f'<form><input name="q" value="{html.escape(s)}" placeholder="搜会话或消息"></form>']
     if K.state != 'ok':
         out.append('<div class="err">微信密钥失效：请在云微信里退出再登录一次，会自动重新获取。</div>')
     elif STATE['error']:
@@ -412,7 +415,7 @@ def home(K, q):
         for r in api('/api/chats', {'limit': ['200']}):
             out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}"><div>{html.escape(r["name"])}</div>'
                        f'<div class="sub">{fmt(r["last_ts"])} · {r["n"]} 条</div></a>')
-    out.append(f'<p class="sub">读取于 {fmt(STATE["last_ingest"])} · <a href="/keys">API key 管理</a></p>')
+    out.append(f'<p class="sub">读取于 {fmt(STATE["last_ingest"])}</p>')
     return page('微信', ''.join(out))
 
 def chat(q):
@@ -490,17 +493,20 @@ else{var a=document.createElement('textarea');a.value=t;document.body.appendChil
 def keys_page(base, new_id=None):
     e = html.escape
     out = ['<p><a class="sub" href="/">← 返回</a></p><h3>API key 管理</h3>',
-           '<p class="sub">每个 agent 用一个 key，不用了就吊销。每个 key 下面是一行给 agent 的说明（已含 key），复制给 agent 即可。'
+           '<p class="sub">每个 agent 用一个 key。泄露了就“重置”（换新 key，名字不变），不用了就“吊销”。每个 key 下面是一行给 agent 的说明（已含 key），复制给 agent 即可。'
            '完整用法见 <a class="file" href="/api/help">/api/help</a>。</p>']
     keys = APIKEYS.list()
     for k in keys:
         new = k['id'] == new_id
         out.append(
-            f'<div class="key" id="k{k["id"]}"><h4>{e(k["name"])}{" <span class=sub>（新建）</span>" if new else ""}</h4>'
+            f'<div class="key" id="k{k["id"]}"><h4>{e(k["name"])}{" <span class=sub>（刚生成，复制下面的说明给 agent）</span>" if new else ""}</h4>'
             f'<div class="sub">创建于 {fmt(k["created"])} · 最后使用 {fmt(k["last_used"])} · <code>{e(k["key"][:8])}…</code></div>'
-            f'<textarea rows="4" readonly{" autofocus" if new else ""}>{e(agent_line(base, k["key"]))}</textarea>'
+            f'<textarea rows="7" readonly{" autofocus" if new else ""}>{e(agent_line(base, k["key"]))}</textarea>'
             f'<button class="pri" type="button" onclick="cp(this,0)">复制给 agent 的说明</button>'
             f'<button type="button" onclick="cp(this,1)" data-k="{e(k["key"])}">只复制 key</button>'
+            f'<form class="inline" method="post" action="/keys/reset" '
+            f'onsubmit="return confirm(&quot;重置「{e(k["name"])}」？会生成新 key，旧 key 立刻失效，需要把新说明重新发给 agent。&quot;)">'
+            f'<input type="hidden" name="id" value="{k["id"]}"><button>重置</button></form>'
             f'<form class="inline" method="post" action="/keys/revoke" '
             f'onsubmit="return confirm(&quot;吊销「{e(k["name"])}」？用它的 agent 会立刻失去访问。&quot;)">'
             f'<input type="hidden" name="id" value="{k["id"]}"><button class="del">吊销</button></form></div>')
@@ -615,7 +621,7 @@ def make_handler(K):
             u = urlparse(self.path)
             try:
                 # Key management is web-only (behind the Lazycat login); /api/ is the public path and stays read-only.
-                if u.path not in ('/keys/create', '/keys/revoke'):
+                if u.path not in ('/keys/create', '/keys/revoke', '/keys/reset'):
                     return self.send('not found', 404, 'text/plain')
                 origin = self.headers.get('Origin') or self.headers.get('Referer') or ''
                 if urlparse(origin).netloc != urlparse(base_url(self)).netloc:
@@ -627,6 +633,10 @@ def make_handler(K):
                     log('apikey: created', k['id'])
                     return self.redirect(f"/keys?new={k['id']}#k{k['id']}")
                 kid = f.get('id', [''])[0]
+                if u.path == '/keys/reset':
+                    if APIKEYS.reset(kid):
+                        log('apikey: reset', kid)
+                    return self.redirect(f"/keys?new={kid}#k{kid}")
                 if APIKEYS.revoke(kid):
                     log('apikey: revoked', kid)
                 return self.redirect('/keys')

@@ -53,6 +53,17 @@ class ApiKeys:
             self._save()
         return dict(k)
 
+    def reset(self, kid):
+        """New secret for an existing key (same name); the old secret stops working at once."""
+        with self.lock:
+            for k in self.keys:
+                if k['id'] == kid:
+                    k['key'] = 'wxb_' + secrets.token_urlsafe(32)
+                    k['last_used'] = 0
+                    self._save()
+                    return True
+        return False
+
     def revoke(self, kid):
         with self.lock:
             n = len(self.keys)
