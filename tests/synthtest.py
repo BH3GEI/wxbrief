@@ -11,6 +11,11 @@ import hashlib, hmac, json, os, re, shutil, subprocess, sys, time
 import urllib.request, urllib.parse, urllib.error
 import ctypes
 
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONTENT = os.path.join(HERE, '..', 'content')
 sys.path.insert(0, CONTENT)
