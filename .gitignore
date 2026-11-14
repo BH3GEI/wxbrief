@@ -1,0 +1,6 @@
+dist/
+vendor-src/
+content/vendor/
+__pycache__/
+*.pyc
+.DS_Store

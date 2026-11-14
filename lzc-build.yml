@@ -1,0 +1,17 @@
+buildscript: sh ./fetch-vendor.sh
+manifest: ./lzc-manifest.yml
+contentdir: ./content
+pkgout: ./dist
+icon: ./icon.png
+# The worker reads the cloud WeChat's data read-only, and needs to see/ptrace its process
+# to re-capture the database passphrase after a WeChat re-login.
+compose_override:
+  services:
+    worker:
+      pid: host
+      cap_add:
+        - SYS_PTRACE
+      security_opt:
+        - apparmor=unconfined
+      volumes:
+        - /lzcsys/data/appvar/cloud.lazycat.catlink.wechat:/wechat:ro
