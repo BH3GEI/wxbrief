@@ -771,7 +771,8 @@ def make_handler(K):
                         log('apikey: reset', kid)
                     return self.redirect(f"/keys?new={kid}#k{kid}")
                 if u.path == '/drafts/dismiss':
-                    draft_dismiss(int(kid))
+                    if kid.isdigit():
+                        draft_dismiss(int(kid))
                     return self.redirect(self.headers.get('Referer') or '/')
                 if APIKEYS.revoke(kid):
                     log('apikey: revoked', kid)

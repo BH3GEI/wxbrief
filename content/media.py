@@ -17,7 +17,7 @@ import ctypes, ctypes.util, glob, hashlib, json, os, re, struct, subprocess, thr
 import multiprocessing as mp
 from collections import Counter
 
-from crypto import AES
+from crypto import AES, OpenSsl
 import runenv
 
 VAR = runenv.var_dir()
@@ -65,17 +65,24 @@ def _probe(acc):
 
 def _scan(args):
     lo, hi, xor, wx, block = args
-    L = _lib(); c = L.EVP_CIPHER_CTX_new(); E = L.EVP_aes_128_ecb()
+    lib = getattr(AES, 'lib', None) if isinstance(AES, OpenSsl) else None
+    if lib is None:   # CommonCrypto (macOS): no reusable context, go through the wrapper
+        for h in range(lo, hi):
+            k = hashlib.md5((str((h << 8) | xor) + wx).encode()).hexdigest()[:16].encode()
+            if AES.ecb(k, block) == PAD:
+                return k.decode()
+        return None
+    c = lib.EVP_CIPHER_CTX_new(); E = lib.EVP_aes_128_ecb()
     out = ctypes.create_string_buffer(32); n = ctypes.c_int()
     try:
         for h in range(lo, hi):
             k = hashlib.md5((str((h << 8) | xor) + wx).encode()).hexdigest()[:16].encode()
-            L.EVP_DecryptInit_ex(c, E, None, k, None); L.EVP_CIPHER_CTX_set_padding(c, 0)
-            L.EVP_DecryptUpdate(c, out, ctypes.byref(n), block, 16)
+            lib.EVP_DecryptInit_ex(c, E, None, k, None); lib.EVP_CIPHER_CTX_set_padding(c, 0)
+            lib.EVP_DecryptUpdate(c, out, ctypes.byref(n), block, 16)
             if out.raw[:16] == PAD:
                 return k.decode()
     finally:
-        L.EVP_CIPHER_CTX_free(c)
+        lib.EVP_CIPHER_CTX_free(c)
     return None
 
 def key_matches(key, block):

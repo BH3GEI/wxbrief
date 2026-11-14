@@ -1,5 +1,5 @@
 """Read-only access to WeChat 4.x SQLCipher4 databases: decrypt db + WAL into a plain SQLite copy."""
-import hashlib, hmac, os, struct
+import ctypes, hashlib, hmac, os, struct
 from crypto import AES
 
 PS, RES = 4096, 80
