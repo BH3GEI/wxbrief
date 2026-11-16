@@ -19,6 +19,7 @@ from tg import TGError
 PREFIX = 'tgbot:'
 API_HOST = 'api.telegram.org'
 DEFAULT_CONFIG = {'size': 5, 'idle_hours': 72, 'fill': False}
+MAX_SIZE = 50      # Telegram allows 20 bots per account, 40 with Premium; leave room for later changes
 PURPOSE_MAX = 20
 
 
@@ -66,7 +67,6 @@ class Bots:
         self.db, self.log, self.tgs, self.key_name, self.proxy, self.call, self.now = db, log, tgs, key_name, proxy, call, now
         self.lock = threading.RLock()
         self.listeners = {}
-        self.fill_note = ''
         self.wake = threading.Event()
         self.autolisten = autolisten
 
@@ -88,6 +88,19 @@ class Bots:
             json.dump(d, f)
         os.replace(tmp, self.path)
 
+    @property
+    def fill_note(self):
+        """Why the pool is (not) growing; kept in the file so a restart does not lose the reason it stopped."""
+        return self._load()['config'].get('note', '')
+
+    @fill_note.setter
+    def fill_note(self, v):
+        with self.lock:
+            d = self._load()
+            if d['config'].get('note', '') != v:
+                d['config']['note'] = v
+                self._save(d)
+
     def config(self):
         return dict(self._load()['config'])
 
@@ -96,8 +109,8 @@ class Bots:
         with self.lock:
             d = self._load()
             if size is not None:
-                if not 0 <= int(size) <= 20:
-                    raise TGError('bad_config', '上限要在 0 到 20 之间（Telegram 每个账号最多 20 个 bot）')
+                if not 0 <= int(size) <= MAX_SIZE:
+                    raise TGError('bad_config', f'上限要在 0 到 {MAX_SIZE} 之间')
                 d['config']['size'] = int(size)
             if idle_hours is not None:
                 if not 1 <= int(idle_hours) <= 24 * 365:
@@ -105,6 +118,7 @@ class Bots:
                 d['config']['idle_hours'] = int(idle_hours)
             if fill is not None:
                 d['config']['fill'] = bool(fill)
+                d['config']['note'] = '' if fill else '已暂停'
             self._save(d)
         self.wake.set()
 
@@ -178,7 +192,9 @@ class Bots:
     def fill_step(self):
         """Create the next bot if the pool is switched on and below its size. Returns seconds to wait."""
         c = self.config()
-        if not c['fill'] or len(self._load()['bots']) >= c['size']:
+        if not c['fill']:
+            return 600                      # keep the note: it says why the pool stopped
+        if len(self._load()['bots']) >= c['size']:
             self.fill_note = ''
             return 600
         if not self.tgs.configured():
@@ -195,8 +211,9 @@ class Bots:
                 self.fill_note = f'BotFather 要求等待 {m.group(1)} 秒'
                 return int(m.group(1)) + 5
             if re.search(r'more than \d+ bots|20 bots', text):
-                self.fill_note = 'Telegram 账号的 bot 总数已满，请在 BotFather 里删掉不用的 bot，或调低上限'
                 self.set_config(fill=False)
+                self.fill_note = ('Telegram 账号的 bot 总数已到上限（普通账号 20 个，Premium 40 个），自动建 bot 已停止。'
+                                  '可以在 BotFather 里删掉不用的 bot，再点“开始建立 bot 池”继续')
                 return 600
             if e.code == 'rate_limited' and e.retry_after:
                 self.fill_note = f'Telegram 限流，{e.retry_after} 秒后继续'

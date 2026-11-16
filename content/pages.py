@@ -517,7 +517,7 @@ def bots_settings():
         out.append(f'<div class="row"><a href="/chat?c={urllib.parse.quote(b["chat"])}">{e(b["name"])}</a>'
                    f'<div class="sub">@{e(b["username"])} · {state}</div></div>')
     out.append('<form method="post" action="/bots/config" style="margin-top:12px">'
-               f'<label class="sub">上限（个，最多 20）</label><input name="size" inputmode="numeric" value="{sm["size"]}">'
+               f'<label class="sub">上限（个，最多 {tgbot.MAX_SIZE}；Telegram 普通账号最多能有 20 个 bot，Premium 40 个，包括你在别处建的）</label><input name="size" inputmode="numeric" value="{sm["size"]}">'
                f'<label class="sub">闲置多久自动回收（小时）</label><input name="idle_hours" inputmode="numeric" value="{sm["idle_hours"]}">'
                '<button>保存</button></form></div>')
     return ''.join(out)

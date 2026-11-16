@@ -107,7 +107,16 @@ try:
     check('BotFather asking to wait is respected', w == 13 and '8 秒' in ctx.BOTS.fill_note, str((w, ctx.BOTS.fill_note)))
     fake.botfather_error = tg.TGError('botfather', 'BotFather 没有接受新建：That I cannot do. You come to me asking for more than 20 bots.')
     ctx.BOTS.fill_step()
-    check('the Telegram-wide limit switches the pool off and says so', ctx.BOTS.config()['fill'] is False and '已满' in ctx.BOTS.fill_note)
+    check('the Telegram-wide limit switches the pool off and says so', ctx.BOTS.config()['fill'] is False and '已到上限' in ctx.BOTS.fill_note)
+    ctx.BOTS.fill_step(); ctx.BOTS.fill_step()
+    check('the reason stays visible after the pool stopped', '已到上限' in ctx.BOTS.fill_note and '已到上限' in call('/api/status')[1]['bots']['note'])
+    again = tgbot.Bots(TMP, ctx.db, ctx.log, ctx.TGS, key_name=lambda k: None, call=api.call, autolisten=False)
+    check('the reason survives a restart', '已到上限' in again.summary()['note'])
+    ctx.BOTS.set_config(fill=True); check('turning it on again clears the old reason', ctx.BOTS.fill_note == '')
+    ctx.BOTS.set_config(fill=False); check('pausing it says paused', ctx.BOTS.fill_note == '已暂停')
+    ctx.BOTS.set_config(size=50)
+    try: ctx.BOTS.set_config(size=51); check('the limit can go up to 50, not beyond', False)
+    except tg.TGError as e: check('the limit can go up to 50 (Premium accounts), not beyond', e.code == 'bad_config' and ctx.BOTS.config()['size'] == 50)
     ctx.BOTS.set_config(size=5)
 
     # ---------------- claiming
