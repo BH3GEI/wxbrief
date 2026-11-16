@@ -245,6 +245,15 @@ try:
     threading.Thread(target=later).start()
     t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={top}&timeout=10")
     check('wait returns as soon as the user replies', [m['text'] for m in got] == ['标题再改一下'] and 1 < time.time() - t0 < 5, str(got))
+    top = got[-1]['id']                                  # after the user's last reply
+    code, own = call('/api/send', 'POST', {'chat': t1['chat'], 'text': '我（agent）又补充一句'})
+    t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={top}&timeout=1")
+    check("waiting in a topic: the agent's own message is not a reply", got == [] and time.time() - t0 >= 0.9, str(got))
+    code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={top}&timeout=1&all=1")
+    check('&all=1 returns everything, the agent\'s own messages too', [m['text'] for m in got] == ['我（agent）又补充一句'])
+    api.push(fake.owner, '用户的回复', thread=tid1); ctx.BOTS.poll_once()
+    code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={top}&timeout=5")
+    check("and the user's reply after it comes through", [m['text'] for m in got] == ['用户的回复'] and got[0]['sender'] == '我')
     before = state()['topics'][str(tid1)]['last_activity']; clock[0] += 100
     call(f"/api/wait?chat={q(t1['chat'])}&timeout=1")
     check('waiting on your own topic counts as activity', state()['topics'][str(tid1)]['last_activity'] == int(clock[0]) > before)
@@ -304,6 +313,10 @@ try:
     h = call('/settings', raw=True)[1]
     check('settings: ready, the bot, topic counts, idle timeout, a re-check button', '已建好' in h and '重新检查' in h and 'action="/bots/setup"' in h and '@exterior_0a0a_bot' in h and '进行中' in h and 'name="idle_hours"' in h)
     check('settings changes are page-only forms', form('/bots/config', idle_hours='48') == 303 and ctx.BOTS.config()['idle_hours'] == 48)
+    ht = call('/api/help?for=telegram', key=None, raw=True)[1]
+    check('help says: wait in the background, never block the foreground; gives a ready loop with the real address', '不要在前台阻塞' in ht and 'while :; do' in ht and base + '/api/wait?chat=tgbot:' in ht and '{base}' not in ht)
+    import api as apimod
+    check('the text copied to agents says so too', '不要在前台阻塞' in apimod.agent_line(base, 'K', 'telegram') and '不要在前台阻塞' in apimod.agent_line(base, 'K', 'all') and 'tgbot' not in apimod.agent_line(base, 'K', 'wechat'))
     check('help text explains topics (Telegram, not WeChat)', '/api/bots' in call('/api/help?for=telegram', key=None, raw=True)[1]
           and '/api/bots' not in call('/api/help?for=wechat', key=None, raw=True)[1])
 finally:

@@ -59,7 +59,8 @@ GET  /api/status   GET /api/help
 再建一个只有本人和这个 bot 的群，打开话题功能，把 bot 设为只能管理话题的管理员。只占用 1 个 bot 名额。
 
 - **开话题**：`POST /api/bots {purpose}`，在群里开一个名为“key 名 · 用途”的话题（用途 1–20 字）。同一个 key 用同样的用途再调用，
-  拿回同一个话题。只有开话题的 key 能在里面发消息（`POST /api/send`），消息推到本人手机；用 `GET /api/wait?chat=tgbot:…&after_id=` 等回复。
+  拿回同一个话题。只有开话题的 key 能在里面发消息（`POST /api/send`），消息推到本人手机；用 `GET /api/wait?chat=tgbot:…&after_id=` 等回复
+  （在话题里只返回本人的消息，`&all=1` 返回全部）。等回复应放在后台任务或监视器里循环，不要在前台阻塞；`/api/help?for=telegram` 里有现成的后台循环脚本。
 - **只认本人**：只保存本人在这些话题里发的消息，其他人或其他地方的消息一律丢弃。
 - **不删除任何东西**：话题闲置 72 小时（可改）自动关闭，标题前加“✓ ”；本人回复或 agent 再发消息时重新打开，仍归原来的 key。
   也可以 `POST /api/bots/release` 主动关闭。
