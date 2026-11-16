@@ -17,6 +17,8 @@ IDLE = 60              # disconnect from Telegram after this many idle seconds
 MEDIA_DAYS = 30        # cached media older than this is removed
 MEDIA_MAX = 2 << 30    # and the cache never grows beyond 2 GB
 FETCH_MAX = 500        # most messages read from Telegram in one call
+FIRST = 200            # a chat read for the first time: this many newest messages; older ones on request
+BUDGET = 25            # seconds a request may spend filling a days= window before it returns what it has
 
 
 class TGError(Exception):
@@ -108,6 +110,7 @@ class Live:
             pass
         self.client = None
         self.qr = None
+        self._me = None
 
     async def _client(self):
         if self.client is None:
@@ -263,7 +266,7 @@ class Live:
         async def go():
             from telethon import utils
             c = await self._client()
-            me = await c.get_me()
+            me_id = await self._my_id(c)
             out = []
             async for m in c.iter_messages(self._peer(ref), limit=limit, min_id=min_id, offset_id=offset_id):
                 if m.date.timestamp() < since_ts:
@@ -271,8 +274,11 @@ class Live:
                 if m.action is not None:
                     out.append(dict(id=m.id, ts=int(m.date.timestamp()), sender='', text='[系统消息]', media=None, name=''))
                     continue
-                s = await m.get_sender() if m.sender is None else m.sender
-                who = '我' if (s is not None and getattr(s, 'id', None) == me.id) else (utils.get_display_name(s) if s else '')
+                s = m.sender          # comes with the batch; never one extra request per message
+                if s is not None:
+                    who = '我' if getattr(s, 'id', None) == me_id else utils.get_display_name(s)
+                else:
+                    who = m.post_author or (utils.get_display_name(m.chat) if m.chat else '')
                 kind, name = None, ''
                 if m.photo:
                     kind = 'img'
@@ -333,10 +339,14 @@ class Live:
                      u.username, u.access_hash) for u in getattr(res, 'users', [])]
         return self._run(go(), 60, login=True)
 
+    async def _my_id(self, c):
+        if not getattr(self, '_me', None):
+            self._me = (await c.get_me()).id
+        return self._me
+
     def me_id(self):
         async def go():
-            c = await self._client()
-            return (await c.get_me()).id
+            return await self._my_id(await self._client())
         return self._run(go(), 20, login=True)
 
     def username_free(self, username):
@@ -662,55 +672,67 @@ class Service:
         c.executemany('insert or ignore into msgs(chat, local_id, ts, type, sender, text, res, backfill) values(?,?,?,?,?,?,?,?)', rows)
         return len(rows)
 
-    def fetch(self, chat, days=30, limit=None, force=False):
+    def fetch(self, chat, days=None, limit=None, force=False):
         """Bring the cache of one chat up to date; returns how many new rows were stored.
 
-        Three things are tracked so a small earlier request can never leave a hole:
-        - newer than the newest cached message (chained in rounds, so a busy chat leaves no gap);
-        - older than the oldest cached message, back to `days` ago (`tg:cover:<chat>` remembers how far back
-          the cache is known to be complete);
-        - the 60 s cache TTL only applies when the requested window is already covered.
-        How many messages are read from Telegram does not depend on how many the caller wants to see.
+        - Always: everything newer than the newest cached message (in rounds, so a busy chat leaves no gap).
+        - A chat read for the first time (or with fewer cached messages than wanted): its newest `limit` messages
+          (default FIRST, at most FETCH_MAX). Older history comes only when asked: scrolling up (fetch_older) or days=.
+        - days=N: also the complete last N days; `tg:cover:<chat>` remembers how far back the cache is complete.
+          Stops after BUDGET seconds and returns what it has; the next call continues.
+        - The 60 s TTL applies when nothing is missing.
         """
-        cap = FETCH_MAX if not limit else max(1, min(int(limit), FETCH_MAX))
+        want = FIRST if not limit else max(1, min(int(limit), FETCH_MAX))
         c = self.db()
         try:
             now = time.time()
+            deadline = now + BUDGET
             at = float(self._kv(c, 'tg:fetch:' + chat, 0))
             cover = float(self._kv(c, 'tg:cover:' + chat, 0))
-            since = now - max(1, int(days)) * 86400
-            need_back = cover == 0 or cover > since + 120
-            if not force and now - at < TTL and not need_back:
+            end = self._kv(c, 'tg:end:' + chat, '0') == '1'
+            cnt, hi, lo = c.execute('select count(*), coalesce(max(local_id),0), coalesce(min(local_id),0) from msgs where chat=?',
+                                    (chat,)).fetchone()
+            since = now - max(1, int(days)) * 86400 if days else None
+            need_back = since is not None and not end and (cover == 0 or cover > since + 120)
+            need_more = cnt < want and not end
+            if not force and now - at < TTL and not need_back and not need_more:
                 return 0
             ref = self._ref(c, chat)
-            hi, lo = c.execute('select coalesce(max(local_id),0), coalesce(min(local_id),0) from msgs where chat=?', (chat,)).fetchone()
             new = 0
+
+            def mark(got, asked):
+                nonlocal cover, end
+                if len(got) < asked:
+                    end, cover = True, 1
+                    c.execute('insert or replace into kv values(?,?)', ('tg:end:' + chat, '1'))
+                elif got:
+                    cover = min(cover or 1e18, min(m['ts'] for m in got))
+                c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(cover)))
+
             if hi:
                 off = 0
                 for _ in range(4):
-                    got = self._call(self.adapter.messages, ref, since, hi, cap, off)
+                    got = self._call(self.adapter.messages, ref, 0, hi, FETCH_MAX, off)
                     new += self._store(c, chat, got, 0); c.commit()   # newer than the cache: really new. Commit: no write lock during network calls
-                    if len(got) < cap:
+                    if len(got) < FETCH_MAX or time.time() > deadline:
                         break
                     off = min(m['id'] for m in got)
-            if need_back:
-                for _ in range(4):
-                    got = self._call(self.adapter.messages, ref, since, 0, cap, lo)
+            if need_more:
+                ask = want - cnt
+                got = self._call(self.adapter.messages, ref, 0, 0, ask, lo)        # the newest ones (lo=0) or just below the cache
+                new += self._store(c, chat, got, 1); mark(got, ask); c.commit()
+                if got:
+                    lo = min(m['id'] for m in got) if not lo else min(lo, min(m['id'] for m in got))
+            if need_back and not end:
+                while time.time() < deadline and cover > since + 120:
+                    got = self._call(self.adapter.messages, ref, since, 0, FETCH_MAX, lo)
                     new += self._store(c, chat, got, 1); c.commit()   # release the write lock before the next network call
-                    if len(got) < cap:
-                        cover = since
+                    if len(got) < FETCH_MAX:
+                        cover = since                     # reached the start of the window (or of the chat)
+                        c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(cover)))
                         break
-                    cover = min(m['ts'] for m in got)
                     lo = min(m['id'] for m in got)
-                c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(cover)))
-            if not c.execute('select 1 from msgs where chat=? limit 1', (chat,)).fetchone():
-                # nothing inside the window (a chat that has been quiet for a long time): show the latest few anyway,
-                # otherwise the page would be empty and there would be nothing to scroll up from
-                got = self._call(self.adapter.messages, ref, 0, 0, 50, 0)
-                new += self._store(c, chat, got, 1); c.commit()   # release the write lock before the next network call
-                c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(min([m['ts'] for m in got] or [since]))))
-                if len(got) < 50:
-                    c.execute('insert or replace into kv values(?,?)', ('tg:end:' + chat, '1'))
+                    mark(got, FETCH_MAX); c.commit()   # mark writes too: commit before the next network call
             top = c.execute('select coalesce(max(local_id),0) from msgs where chat=?', (chat,)).fetchone()[0]
             c.execute('insert into chats(chat, name, last_local) values(?,?,?) on conflict(chat) do update set '
                       'last_local=max(last_local, excluded.last_local)',

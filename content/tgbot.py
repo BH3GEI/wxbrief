@@ -172,6 +172,10 @@ class Bots:
         c = self.config()
         if not c['setup']:
             return 600
+        try:
+            self._forget_deleted_bot()        # every click re-checks: the user may have deleted the bot or the group
+        except TGError:
+            pass
         if self.ready():
             self.set_config(setup=False); self.note = '已建好'
             return 600
@@ -179,7 +183,6 @@ class Bots:
             self.note = '等待 Telegram 设置和登录'
             return 60
         try:
-            self._forget_deleted_bot()
             d = self._load()
             if not d.get('bot'):
                 self.note = '正在通过 BotFather 新建 bot…'
@@ -220,20 +223,35 @@ class Bots:
     def _forget_deleted_bot(self):
         """If Telegram says the saved bot no longer exists (the user deleted it in BotFather), forget it and everything
         made with it, so the setup starts clean. A network error is not a reason: only Telegram's explicit answer."""
-        b = self._load().get('bot')
+        d = self._load()
+        b, g = d.get('bot'), d.get('group')
         if not b:
             return
+        gone = lambda e: e.code == 'telegram_error' and re.search(r'unauthorized|not found|kicked|forbidden', e.msg, re.I)
         try:
             self.call(b['token'], 'getMe', {}, self.proxy())
         except TGError as e:
-            if e.code == 'telegram_error' and re.search(r'unauthorized|not found', e.msg, re.I):
-                with self.lock:
-                    d = self._load()
-                    for k in ('bot', 'group'):
-                        d.pop(k, None)
-                    d['topics'], d['offset'] = {}, 0
-                    self._save(d)
+            if gone(e):
+                self._forget('bot', 'group')
                 self.log('bots: saved bot', b['username'], 'no longer exists; starting clean')
+            return
+        if g:
+            try:
+                self.call(b['token'], 'getChat', {'chat_id': g['id']}, self.proxy())
+            except TGError as e:
+                if gone(e):
+                    self._forget('group')
+                    self.log('bots: the group is gone; a new one will be made')
+
+    def _forget(self, *what):
+        with self.lock:
+            d = self._load()
+            for k in what:
+                d.pop(k, None)
+            d['topics'] = {}
+            if 'bot' in what:
+                d['offset'] = 0
+            self._save(d)
 
     def _new_username(self):
         for _ in range(8):

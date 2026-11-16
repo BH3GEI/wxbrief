@@ -105,6 +105,11 @@ try:
     check('other chat: held as a draft, NOT sent', code == 200 and r['status'] == 'pending_approval' and len(fake.sent) == n and r['draft_id'])
     code, r = call('/api/send', 'POST', {'chat': 'tg:u404', 'text': 'x'}); check('unknown chat refused', code == 404 and r['error'] == 'unknown_chat')
     code, r = call('/api/send', 'POST', {'chat': 'wxid_a', 'text': 'x'}); check('WeChat chat refused with a pointer to drafts', code == 400 and r['error'] == 'wechat_send_unsupported')
+    for empty in ('', '   ', None):
+        code, r = call('/api/send', 'POST', {'chat': empty, 'text': 'x'})
+        check(f'empty chat ({empty!r}) -> 400 missing_chat, not "WeChat is read-only"', code == 400 and r['error'] == 'missing_chat', str(r))
+    code, r = call('/api/send', 'POST', {'text': 'x'}); check('no chat field at all -> missing_chat', code == 400 and r['error'] == 'missing_chat')
+    code, r = call('/api/send', 'POST', {'chat': 'no_such_chat', 'text': 'x'}); check('a chat id that does not exist -> 404 unknown_chat', code == 404 and r['error'] == 'unknown_chat')
     code, r = call('/api/send', 'POST', {'chat': 'tg:me', 'text': 'x'}, auth=False); check('send needs a key', code == 401)
     did = call('/api/drafts')[1][0]['id']
 
@@ -238,14 +243,17 @@ try:
         c = ctx.db(); row = c.execute("select ts, id from msgs where chat='wxid_big' and local_id=?", (min(nums),)).fetchone(); c.close(); ts_, id_ = row['ts'], row['id']
     check('paging up repeatedly walks the whole history with no gaps or repeats', sorted(seen) == list(range(1, 300)) and len(set(seen)) == len(seen) and more is False, f'{len(seen)} {rounds}')
 
-    fake.msgs[('me', 0)] = [dict(id=i, ts=int(time.time()) - 90 * 86400 + i, sender='我', text=f'收藏{i}', media=None, name='') for i in range(120, 0, -1)]
+    fake.msgs[('me', 0)] = [dict(id=i, ts=int(time.time()) - 90 * 86400 + i, sender='我', text=f'收藏{i}', media=None, name='') for i in range(300, 0, -1)]
+    kv = ctx.db(); kv.execute('delete from msgs where chat="tg:me"'); kv.execute("delete from kv where k like 'tg:%:tg:me'"); kv.commit(); kv.close()
     h = call('/chat?c=tg:me', raw=True)[1].decode()
-    check('Telegram: a chat quiet for 90 days still opens with its latest 50', '收藏120' in h and '收藏71' in h and '收藏70' not in h)
+    check('Telegram: opening a chat reads only its newest 200', '收藏300' in h and '收藏101' in h and '收藏100' not in h)
     first_id = int(re.search(r'<div class="m" id="m(\d+)"', h).group(1))
     c = ctx.db(); r = c.execute('select ts, id from msgs where id=?', (first_id,)).fetchone(); c.close()
     code, d = call(f'/older?c=tg:me&ts={r["ts"]}&id={r["id"]}')
-    check('Telegram: scrolling up reads older messages from Telegram on demand', code == 200 and d['count'] == 70 and '收藏1' in d['html'] and '收藏70' in d['html'], str(d.get('count')))
-    check('Telegram: the start of the chat is reached and reported', d['more'] is False)
+    check('Telegram: scrolling up reads older messages from Telegram on demand', code == 200 and d['count'] == 100 and '收藏1' in d['html'] and '收藏100' in d['html'], str(d.get('count')))
+    c = ctx.db(); r = c.execute('select ts, id from msgs where chat="tg:me" order by ts limit 1').fetchone(); c.close()
+    code, d = call(f'/older?c=tg:me&ts={r["ts"]}&id={r["id"]}')
+    check('Telegram: the start of the chat is reached and reported', d['more'] is False and d['count'] == 0)
     fake.flood = 30; ctx.TGS.flood_until = 0
     c = ctx.db(); c.execute('delete from msgs where chat="tg:me" and local_id<100'); c.execute("delete from kv where k='tg:end:tg:me'"); c.commit(); c.close()
     c = ctx.db(); r = c.execute('select ts, id from msgs where chat="tg:me" order by ts limit 1').fetchone(); c.close()

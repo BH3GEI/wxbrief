@@ -130,56 +130,70 @@ try:
     def ids(chat):
         c = db(); r = [x[0] for x in c.execute('select local_id from msgs where chat=? order by local_id', (chat,))]; c.close(); return r
     def n_calls(): return sum(1 for x in f.calls if isinstance(x, tuple) and x[0] == 'messages')
-    s.fetch('tg:g9', days=1)
-    check('a 1 day read stores only the recent messages', ids('tg:g9') == [3, 4, 5, 6])
+    # first read: only the newest few (limit), not a whole window
+    s.fetch('tg:g9', limit=3)
+    check('a first read takes only the newest `limit` messages', ids('tg:g9') == [4, 5, 6])
+    s.fetch('tg:g9', days=1, limit=3, force=True)
+    check('days=1 fills the last day', ids('tg:g9') == [3, 4, 5, 6])
     s.fetch('tg:g9', days=30)
     check('a later 30 day read backfills the older ones (Saved Messages bug)', ids('tg:g9') == [1, 2, 3, 4, 5, 6])
     c = db(); by_time = [x[0] for x in c.execute('select local_id from msgs where chat="tg:g9" order by ts, id')]
     by_id = [x[0] for x in c.execute('select local_id from msgs where chat="tg:g9" order by id')]; c.close()
     check('backfilled rows get later db ids, so display must sort by time', by_time == [1, 2, 3, 4, 5, 6] and by_id != by_time)
-    k = n_calls(); s.fetch('tg:g9', days=30); s.fetch('tg:g9', days=1)
-    check('once the window is covered, repeat reads inside the TTL cost nothing', n_calls() == k)
-    c = db(); c.execute("delete from kv where k='tg:cover:tg:g9'"); c.execute('delete from msgs where chat="tg:g9" and local_id<6'); c.commit(); c.close()
-    s.fetch('tg:g9', days=30)
+    k = n_calls(); s.fetch('tg:g9', days=30); s.fetch('tg:g9', days=1); s.fetch('tg:g9')
+    check('once nothing is missing, repeat reads inside the TTL cost nothing', n_calls() == k)
+    c = db(); c.execute("delete from kv where k in ('tg:cover:tg:g9', 'tg:end:tg:g9')"); c.execute('delete from msgs where chat="tg:g9" and local_id<6'); c.commit(); c.close()
+    s.fetch('tg:g9')
     check('a cache left half-filled by an older version heals on the next read', ids('tg:g9') == [1, 2, 3, 4, 5, 6])
 
     # tiny read size: paging back takes several rounds but ends complete
     tg.FETCH_MAX = 2
     try:
         f.msgs[('me', 0)] = [dict(id=i, ts=now - 3600 * (20 - i), sender='我', text=f'n{i}', media=None, name='') for i in range(7, 0, -1)]
-        s.fetch('tg:me', days=30)
+        s.fetch('tg:me', days=30, limit=2)
         check('paging back in small rounds still loads the whole window', ids('tg:me') == list(range(1, 8)))
         f.msgs[('me', 0)] = [dict(id=i, ts=now - 600 + i, sender='我', text=f'n{i}', media=None, name='') for i in range(14, 0, -1)]
-        s.fetch('tg:me', days=30, force=True)
+        s.fetch('tg:me', force=True)
         check('a busy chat (many new messages since last time) leaves no gap', ids('tg:me') == list(range(1, 15)))
     finally:
         tg.FETCH_MAX = 500
 
-    # ---- scrolling up: history older than the 30 day window, down to the first message
+    # a days= window has a time budget: it returns what it has, the next call continues
     c = db(); c.execute('delete from msgs where chat="tg:me"'); c.execute("delete from kv where k like 'tg:%:tg:me'"); c.commit(); c.close()
-    f.msgs[('me', 0)] = [dict(id=i, ts=now - 90 * DAY + i, sender='我', text=f'旧{i}', media=None, name='') for i in range(250, 0, -1)]
-    s.fetch('tg:me', days=30)
-    check('a chat quiet for 90 days still opens with its latest messages (not empty)', ids('tg:me') == list(range(201, 251)))
+    f.msgs[('me', 0)] = [dict(id=i, ts=now - 20 * DAY + i * 3600, sender='我', text=f'w{i}', media=None, name='') for i in range(400, 0, -1)]
+    budget, tg.BUDGET = tg.BUDGET, 0
+    try:
+        s.fetch('tg:me', days=30, limit=50)
+        check('out of time: only what fit (the newest 50) is there, no hang', ids('tg:me') == list(range(351, 401)))
+    finally:
+        tg.BUDGET = budget
+    s.fetch('tg:me', days=30, limit=50)
+    check('the next call continues and completes the window', ids('tg:me') == list(range(1, 401)))
+
+    # ---- scrolling up: history older than any window, down to the first message
+    c = db(); c.execute('delete from msgs where chat="tg:me"'); c.execute("delete from kv where k like 'tg:%:tg:me'"); c.commit(); c.close()
+    f.msgs[('me', 0)] = [dict(id=i, ts=now - 90 * DAY + i, sender='我', text=f'旧{i}', media=None, name='') for i in range(450, 0, -1)]
+    s.fetch('tg:me')
+    check('a chat quiet for 90 days opens with its newest 200 (not empty, not everything)', ids('tg:me') == list(range(251, 451)))
     check('start of chat is not reported yet', not s.at_start('tg:me'))
-    k = n_calls(); got = s.fetch_older('tg:me', 100)
-    check('scrolling up loads the next 100 older messages, beyond the 30 day window', got == 100 and ids('tg:me') == list(range(101, 251)))
+    got = s.fetch_older('tg:me', 100)
+    check('scrolling up loads the next 100 older messages', got == 100 and ids('tg:me') == list(range(151, 451)))
     s.fetch_older('tg:me', 100)
-    check('and the next 100', ids('tg:me') == list(range(1, 251)))
+    check('and the next 100', ids('tg:me') == list(range(51, 451)))
     check('a full batch does not prove the start was reached', not s.at_start('tg:me'))
     s.fetch_older('tg:me', 100)
-    check('an empty batch marks the start of the chat', s.at_start('tg:me'))
+    check('a short batch marks the start of the chat', s.at_start('tg:me') and ids('tg:me') == list(range(1, 451)))
     k = n_calls(); s.fetch_older('tg:me', 100)
     check('after the start is known, no more requests to Telegram', n_calls() == k)
     check('days=365 no longer re-reads the old history', (s.fetch('tg:me', days=365, force=False), n_calls())[1] == k)
-    f.msgs[('me', 0)] = [dict(id=i, ts=now - 90 * DAY + i, sender='我', text=f'旧{i}', media=None, name='') for i in range(250, 100, -1)]
-    c = db(); c.execute('delete from msgs where chat="tg:me" and local_id<201'); c.execute("delete from kv where k in ('tg:end:tg:me')"); c.commit(); c.close()
+    c = db(); c.execute('delete from msgs where chat="tg:me" and local_id<251'); c.execute("delete from kv where k in ('tg:end:tg:me')"); c.commit(); c.close()
     f.flood = 30; s.flood_until = 0
     try: s.fetch_older('tg:me', 100); check('rate limit while scrolling is reported', False)
-    except tg.TGError as e: check('rate limit while scrolling is reported, cache untouched', e.code == 'rate_limited' and ids('tg:me') == list(range(201, 251)))
+    except tg.TGError as e: check('rate limit while scrolling is reported, cache untouched', e.code == 'rate_limited' and ids('tg:me') == list(range(251, 451)))
     f.flood = 0; s.flood_until = 0
     f.msgs[('u', 8)] = []
     c = db(); c.execute("insert into tg_dialogs(chat,name,kind,hash,last_ts,username) values('tg:u8','空会话','u',1,0,null)"); c.commit(); c.close()
-    s.fetch('tg:u8', days=30)
+    s.fetch('tg:u8')
     check('a chat with no messages at all is marked as fully read', s.at_start('tg:u8') and ids('tg:u8') == [])
 
     # ---- live search: Telegram's own search over the whole history, returned but never stored

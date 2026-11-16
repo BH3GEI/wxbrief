@@ -187,7 +187,7 @@ def api(path, q, agent=False):
             res = ctx.TGS.search_live(g('q'), chat if tg.is_tg(chat) else None, lim)      # Telegram's own search; never stored
             return [r for r in res if r['chat'] not in hide] if agent else res
         if tg.is_tg(chat) and path == '/api/messages' and g('live', '1') != '0':
-            ctx.TGS.fetch(chat, days=_intq(g, 'days', 30))
+            ctx.TGS.fetch(chat, days=_intq(g, 'days', 0) or None, limit=min(lim, tg.FETCH_MAX))
         w, a = [], []
         if kind in KIND_SQL: w.append(KIND_SQL[kind][5:])
         if src in SRC_SQL: w.append(SRC_SQL[src][5:])
@@ -229,7 +229,8 @@ def agent_line(base, key, which='all'):
           'GET /api/search?q=关键词 搜索，GET /api/contacts?source=wechat 查通讯录（含没聊过的人），消息里有 media.url 的用 GET /api/media/消息ID 下载图片/视频/文件/语音原件。'
           '写完建议回复：POST /api/drafts，JSON {chat: 会话ID, body: 文本}，我会在页面上复制或忽略；你不会代发微信消息。')
     t = ('Telegram：GET /api/chats?source=telegram 列出我所有的会话（会话ID 形如 tg:u123）；GET /api/messages?chat=会话ID 取消息，'
-         '应用会自己从 Telegram 现查最近 30 天（&days= 可改，&live=0 只看缓存）；图片/文件/语音默认只有占位，'
+         '应用会自己从 Telegram 现查，第一次默认只拉最近 200 条（&limit= 最多 500）；要更早的加 &days=N 补齐最近 N 天'
+         '（消息多时一次补不完，再调一次接着补），找很早的某句话用 /api/search?q=…&source=telegram&live=1；&live=0 只看缓存。图片/文件/语音默认只有占位，'
          '请求 GET /api/media/消息ID 时才会下载（media.status 是 not_downloaded 或 ready）。'
          'GET /api/contacts?source=telegram 查通讯录（含没聊过的人，不含手机号）。发消息：POST /api/send，JSON {chat, text}；发给 tg:me（我的收藏夹）会直接发出，发给别人只会放进草稿，等我在页面上确认。'
          '被限流时返回 {error: rate_limited, retry_after: 秒}，请等待后再试。你的读取不会标记已读。'
@@ -292,9 +293,11 @@ source=telegram。会话ID：tg:me（收藏夹）、tg:u<数字>（私聊/机器
 GET /api/chats?source=telegram
     我所有的会话（含没读过的），名字和最近活动时间是现查的（缓存 60 秒）。n 是已缓存的消息数。
     q= 可以按名字搜，也可以按 @用户名 搜（不区分大小写，@ 可写可不写）；会话里有 username 字段。
-GET /api/messages?chat=tg:...&days=30&limit=200
-    先从 Telegram 现查这个会话（缓存超过 60 秒才会再查，只取新的），再返回。第一次默认取最近 30 天，days 可改。
-    &live=0 只看缓存，不联网。读取不会把消息标记为已读。
+GET /api/messages?chat=tg:...&limit=200[&days=N]
+    先从 Telegram 现查这个会话的新消息（缓存超过 60 秒才会再查），再返回。读取不会把消息标记为已读。
+    第一次读某个会话时，只拉最近 limit 条（默认 200，最多 500），这样快，也不占空间。
+    要更早的历史：加 &days=N，会补齐最近 N 天。消息多的会话一次可能补不完（每次最多约 25 秒），再调用一次会接着补；
+    想找很早的某句话，用 /api/search?live=1 直接搜全部历史更快。&live=0 只看缓存，不联网。
 媒体：消息里的图片/视频/语音/文件默认只有占位（text 里的 [图片] 等），media.status=not_downloaded。
     GET /api/media/<消息id> 才会从 Telegram 下载（可能要几秒），之后 status=ready 并缓存；缓存超过 30 天或 2GB 会自动清理，清掉后可再下载。
 发送：POST /api/send   {chat: 会话ID, text: 文本, note: 可选说明}（JSON）
@@ -356,6 +359,8 @@ def api_send(chat, text, note='', key=None):
     """One entry point for agents. Saved Messages and the agent's own bots are sent at once; any other Telegram
     chat becomes a draft that the user approves on the page. WeChat is read-only."""
     chat = (chat or '').strip()
+    if not chat:
+        raise tg.TGError('missing_chat', '缺少 chat（发到哪个会话）。会话ID 从 GET /api/chats 拿；和我对话的话题从 POST /api/bots 拿。')
     if tgbot.is_bot(chat):
         if not ctx.BOTS:
             raise tg.TGError('unknown_chat', '没有这个 bot')
@@ -363,6 +368,13 @@ def api_send(chat, text, note='', key=None):
     if chat == BOTFATHER:
         raise tg.TGError('hidden', '这个会话不对 agent 开放')
     if not tg.is_tg(chat):
+        c = db()
+        try:
+            known = c.execute('select 1 from chats where chat=?', (chat,)).fetchone()
+        finally:
+            c.close()
+        if not known:
+            raise tg.TGError('unknown_chat', f'没有这个会话：{chat[:60]}。会话ID 从 GET /api/chats 拿。')
         raise tg.TGError('wechat_send_unsupported', '微信是只读的，不能发送。要给微信里的人起草回复，用 POST /api/drafts，由用户复制发送。')
     if chat == 'tg:me':
         return ctx.TGS.send_direct(chat, text)

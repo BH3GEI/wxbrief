@@ -24,7 +24,7 @@ class BotAPI:
     """Fake Bot API: update queue, sent messages, topics."""
     def __init__(self):
         self.updates, self.sent, self.calls, self.uid, self.next_topic, self.topics = [], [], [], 0, 100, {}
-        self.dead, self.offline = set(), set()
+        self.dead, self.offline, self.gone_chats = set(), set(), set()
     def push(self, from_id, text, chat_id=GROUP, thread=None, topic=True, **extra):
         self.uid += 1
         m = {'message_id': 1000 + self.uid, 'date': int(time.time()), 'from': {'id': from_id},
@@ -53,6 +53,10 @@ class BotAPI:
             self.topics[p['message_thread_id']]['closed'] = method == 'closeForumTopic'; return True
         if method == 'setMyName':
             return True
+        if method == 'getChat':
+            if p['chat_id'] in self.gone_chats:
+                raise tg.TGError('telegram_error', 'Bad Request: chat not found')
+            return {'id': p['chat_id'], 'type': 'supergroup', 'is_forum': True}
         if method == 'getMe':
             if token in self.dead:
                 raise tg.TGError('telegram_error', 'Unauthorized')
@@ -152,6 +156,18 @@ try:
     nb = b4._load()['bot']
     check('a bot deleted in BotFather is forgotten; setup makes a new one and a new group', nb['username'] != 'exterior_dead_bot' and f4.created == 1
           and b4.ready() and len(f4.groups) == 1 and f4.groups[0][1] == nb['username'])
+
+    # already set up, then the user deletes things and clicks again: every click re-checks
+    T5 = tempfile.mkdtemp(dir=TMP); f5 = Fake(); f5.groups = []; s5 = tg.Service(T5, ctx.db, ctx.log, adapter=f5)
+    s5.set_config(api_id='1', api_hash='h'); open(T5 + '/tg.session', 'w').write('s')
+    b5 = tgbot.Bots(T5, ctx.db, ctx.log, s5, key_name=lambda k: None, call=api.call, autolisten=False)
+    b5.set_config(setup=True); b5.setup_step(); first = b5._load()['bot']['token']
+    b5.set_config(setup=True); b5.setup_step()
+    check('clicking again when everything exists changes nothing', b5._load()['bot']['token'] == first and f5.created == 1 and len(f5.groups) == 1)
+    api.gone_chats.add(b5._load()['group']['id']); b5.set_config(setup=True); b5.setup_step()
+    check('only the group deleted: same bot, a new group', b5._load()['bot']['token'] == first and f5.created == 1 and len(f5.groups) == 2 and b5.ready())
+    api.gone_chats.clear(); api.dead.add(first); b5.set_config(setup=True); b5.setup_step()
+    check('the bot deleted after setup: a new bot and a new group on the next click', b5._load()['bot']['token'] != first and f5.created == 2 and len(f5.groups) == 3 and b5.ready())
 
     # ---------------- opening topics
     code, t1 = call('/api/bots', 'POST', {'purpose': '日报'})
@@ -304,7 +320,7 @@ said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('d
 check('the only fixed texts ever sent to BotFather are /newbot and /cancel', said == {'/newbot', '/cancel'}, str(said))
 methods = set(re.findall(r"self\.call\([^,]+, '(\w+)'", botsrc)) | set(re.findall(r"_topic_call\('(\w+)'", botsrc))
 check('Bot API methods used: send, read, rename, create/edit/close/reopen topics; nothing that deletes',
-      methods == {'getMe', 'sendMessage', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
+      methods == {'getMe', 'getChat', 'sendMessage', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
 check('the group is made with manage_topics only', 'ChatAdminRights(manage_topics=True)' in tgsrc)
 
 print('ALL PASS' if ok else 'FAILURES')

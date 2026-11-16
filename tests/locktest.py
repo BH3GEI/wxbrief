@@ -73,7 +73,7 @@ try:
         seen.append(can_write_now())
         return orig(*a, **k)
     f.messages = probing
-    s.fetch('tg:u7', days=30)
+    s.fetch('tg:u7', days=30, limit=2)
     c = ctx.db(); got = c.execute("select count(*) from msgs where chat='tg:u7'").fetchone()[0]; c.close()
     check('Telegram fetch in small rounds stored everything', got == 7, str(got))
     check('while waiting for Telegram, others can write', len(seen) >= 3 and all(seen), str(seen))

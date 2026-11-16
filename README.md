@@ -25,7 +25,7 @@
 
 ```
 GET  /api/chats?q=&source=&kind=group|private&limit=
-GET  /api/messages?chat=&source=&kind=&since=&until=&after_id=&limit=   # Telegram 会话会先现查（缓存 60 秒）
+GET  /api/messages?chat=&source=&kind=&since=&until=&after_id=&limit=[&days=]   # Telegram：先现查新消息；第一次最近 200 条，days=N 补齐 N 天
 GET  /api/search?q=&source=&chat=&limit=[&live=1]                        # live=1：向 Telegram 搜全部历史，不存库
 GET  /api/wait?after_id=&chat=&source=&timeout=                          # 等新消息，一到就返回
 GET  /api/contacts?q=&source=&kind=&type=
@@ -46,7 +46,8 @@ GET  /api/status   GET /api/help
 在设置页填入自己的 `api_id` / `api_hash`（my.telegram.org 申请）、可选代理（`socks5://地址:端口`），扫码登录；
 开了两步验证的账号扫码后再输入密码。
 
-- 只有 agent 或页面请求某个会话时才去 Telegram 读取，第一次默认最近 30 天，往上划或加大 `days` 会继续往前补。
+- 只有 agent 或页面请求某个会话时才去 Telegram 读取。第一次只拉最近 200 条（`limit` 最多 500），快，也不占空间；
+  往上划或加 `days=N` 才继续往前补（每次最多约 25 秒，补不完下次接着补）。同一条消息只存一份。
 - 媒体默认只有占位，请求 `/api/media/<id>` 才下载；缓存超过 30 天或 2GB 自动清理。
 - 发给 `tg:me`（收藏夹）直接发出；发给其他会话只写入草稿，网页上点两次确认后才发送，每条发送都有记录。
 - @BotFather 的会话对 agent 隐藏（里面有历史 bot token），也不能通过接口给它发消息。
