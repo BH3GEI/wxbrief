@@ -22,7 +22,7 @@ def make(tmp):
         c = sqlite3.connect(tmp + '/brief.db'); c.row_factory = sqlite3.Row; return c
     c = db()
     c.executescript('''create table msgs(id integer primary key, chat text, local_id int, server_id int, ts int, type int,
-        sender text, text text, res text, unique(chat, local_id));
+        sender text, text text, res text, backfill int default 0, unique(chat, local_id));
       create table chats(chat text primary key, name text, last_local int default 0);
       create table kv(k text primary key, v text);
       create table tg_dialogs(chat text primary key, name text, kind text, hash int, last_ts int, username text);

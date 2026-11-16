@@ -62,6 +62,10 @@ DELETE /api/drafts/<id>    忽略一条
 
 应用由两个容器组成：`worker`（读取、存储、接口、页面，无任何额外权限）和 `capture`（仅在微信密钥失效时用 gdb 抓取新口令，需要 `pid: host` 与 `SYS_PTRACE`，没有网络入口，不读消息）。
 
+## 代码结构
+
+`content/` 下：`app.py`（HTTP 和启动）、`ctx.py`（路径、日志、数据库、共享的服务）、`wechat.py`（读微信数据库）、`api.py`（给 agent 的接口和说明文字）、`pages.py`（网页），`web/` 是页面用的 CSS 和 JS；`tg.py` 是 Telegram，`keys.py` / `capturer.py` 是微信密钥。测试：`python3 tests/apptest.py`、`tests/tgtest.py`、`tests/synthtest.py`。
+
 ## Windows
 
 1. 安装 Python 3.10+（python.org，安装时勾选 Add to PATH）。

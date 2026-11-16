@@ -583,7 +583,8 @@ class Service:
             c.close()
 
     # -- messages
-    def _store(self, c, chat, got):
+    def _store(self, c, chat, got, backfill):
+        """backfill=1 marks history filled in later; incremental pulls (after_id) skip those rows."""
         rows = []
         for m in got:
             text = m['text']
@@ -594,9 +595,9 @@ class Service:
                 text = (text + ' ' + ph).strip() if text else ph
             elif m.get('sticker'):
                 text = f"[贴纸 {m['sticker']}]"
-            rows.append((chat, m['id'], m['ts'], 1, m['sender'], text, res))
+            rows.append((chat, m['id'], m['ts'], 1, m['sender'], text, res, backfill))
         rows.sort(key=lambda r: (r[2], r[1]))      # Telegram returns newest first; insert oldest first
-        c.executemany('insert or ignore into msgs(chat, local_id, ts, type, sender, text, res) values(?,?,?,?,?,?,?)', rows)
+        c.executemany('insert or ignore into msgs(chat, local_id, ts, type, sender, text, res, backfill) values(?,?,?,?,?,?,?,?)', rows)
         return len(rows)
 
     def fetch(self, chat, days=30, limit=None, force=False):
@@ -626,14 +627,14 @@ class Service:
                 off = 0
                 for _ in range(4):
                     got = self._call(self.adapter.messages, ref, since, hi, cap, off)
-                    new += self._store(c, chat, got)
+                    new += self._store(c, chat, got, 0)      # newer than the cache: really new
                     if len(got) < cap:
                         break
                     off = min(m['id'] for m in got)
             if need_back:
                 for _ in range(4):
                     got = self._call(self.adapter.messages, ref, since, 0, cap, lo)
-                    new += self._store(c, chat, got)
+                    new += self._store(c, chat, got, 1)
                     if len(got) < cap:
                         cover = since
                         break
@@ -644,7 +645,7 @@ class Service:
                 # nothing inside the window (a chat that has been quiet for a long time): show the latest few anyway,
                 # otherwise the page would be empty and there would be nothing to scroll up from
                 got = self._call(self.adapter.messages, ref, 0, 0, 50, 0)
-                new += self._store(c, chat, got)
+                new += self._store(c, chat, got, 1)
                 c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(min([m['ts'] for m in got] or [since]))))
                 if len(got) < 50:
                     c.execute('insert or replace into kv values(?,?)', ('tg:end:' + chat, '1'))
@@ -674,7 +675,7 @@ class Service:
             if not lo or self._kv(c, 'tg:end:' + chat, '0') == '1':
                 return 0
             got = self._call(self.adapter.messages, self._ref(c, chat), 0, 0, n, lo)
-            self._store(c, chat, got)
+            self._store(c, chat, got, 1)
             cover = float(self._kv(c, 'tg:cover:' + chat, 0))
             if len(got) < n:                                   # reached the first message
                 c.execute('insert or replace into kv values(?,?)', ('tg:end:' + chat, '1'))

@@ -1,0 +1,13 @@
+<div id="ld" hidden><span class="spin"></span><span id="ldt">加载中…</span></div>
+<script>(function(){var ld=document.getElementById('ld'),tm,to;
+function on(t){clearTimeout(tm);clearTimeout(to);document.documentElement.classList.add('busy');
+ document.getElementById('ldt').textContent=t||'加载中…';tm=setTimeout(function(){ld.hidden=false},350);to=setTimeout(off,60000)}
+function off(){clearTimeout(tm);clearTimeout(to);ld.hidden=true;document.documentElement.classList.remove('busy');
+ [].forEach.call(document.querySelectorAll('button[data-was]'),function(b){b.textContent=b.dataset.was;b.disabled=false;delete b.dataset.was})}
+document.addEventListener('submit',function(e){if(e.defaultPrevented)return;var f=e.target,b=e.submitter||(f.querySelector&&f.querySelector('button'));
+ on(f.dataset&&f.dataset.busy);if(b&&!b.dataset.was){setTimeout(function(){b.dataset.was=b.textContent;b.textContent='处理中…';b.disabled=true},0)}});
+document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');
+ if(!a||e.defaultPrevented||e.metaKey||e.ctrlKey||e.shiftKey||a.target==='_blank')return;
+ var h=a.getAttribute('href')||'';if(!h||h.charAt(0)==='#'||/^(mailto|tel):/.test(h))return;
+ if(h.indexOf('/media/')>-1&&!a.querySelector('img')){on('正在下载…');setTimeout(off,20000);return}on()});
+window.addEventListener('pageshow',function(e){if(e.persisted)off()})})()</script>
