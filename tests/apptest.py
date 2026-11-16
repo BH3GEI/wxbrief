@@ -56,6 +56,15 @@ try:
         try: r = urllib.request.build_opener(NoRedirect).open(req); return r.status, r.read().decode()
         except urllib.error.HTTPError as e: return e.code, e.read().decode()
 
+    def settle(timeout=8):
+        """Wait until background Telegram reads (chat sync, dialog list) are done."""
+        end = time.time() + timeout
+        while time.time() < end:
+            if not pages.TG_BG['running'] and not any(x.get('running') for x in pages.SYNC.values()):
+                return True
+            time.sleep(0.05)
+        return False
+
     # ---- help / auth
     for w in ('wechat', 'telegram', 'all'):
         code, t = call(f'/api/help?for={w}', auth=False)
@@ -151,10 +160,10 @@ try:
     check('home and Telegram tabs also have the auto-refresh switch', all('id="autot"' in call(u, raw=True)[1].decode() for u in ('/', '/tg')))
 
     n0 = fake.calls.count('dialogs')
-    code, _ = post_form('/refresh', to='/tg'); check('refresh on the Telegram tab re-reads the dialog list now', code == 303 and fake.calls.count('dialogs') == n0 + 1)
+    code, _ = post_form('/refresh', to='/tg'); settle(); check('refresh on the Telegram tab re-reads the dialog list (in the background)', code == 303 and fake.calls.count('dialogs') == n0 + 1)
     kv = ctx.db(); kv.execute("insert or replace into kv values('tg:fetch:tg:u7', ?)", (str(time.time()),)); kv.commit(); kv.close()
     m0 = sum(1 for x in fake.calls if isinstance(x, tuple) and x[0] == 'messages')
-    code, r = post_form('/refresh', to='/chat?c=tg%3Au7'); check('refresh in a Telegram chat forces a re-read even inside the 60 s cache', code == 303 and sum(1 for x in fake.calls if isinstance(x, tuple) and x[0] == 'messages') == m0 + 1)
+    code, r = post_form('/refresh', to='/chat?c=tg%3Au7'); settle(); check('refresh in a Telegram chat forces a re-read even inside the 60 s cache', code == 303 and sum(1 for x in fake.calls if isinstance(x, tuple) and x[0] == 'messages') == m0 + 1)
     ctx.INGEST_NOW.clear(); t0 = time.time()
     code, _ = post_form('/refresh', to='/'); check('refresh on the WeChat tab wakes the reader', code == 303 and ctx.INGEST_NOW.is_set())
     for bad in ('//evil.example/x', 'https://evil.example', '/\\evil.example'):
@@ -182,6 +191,43 @@ try:
     kv = ctx.db(); kv.execute("delete from kv where k like 'tg:fetch:%'"); kv.commit(); kv.close()
     check('ping survives Telegram being rate limited', call('/ping?tab=chat&c=tg%3Au7', raw=True)[0] == 200)
     fake.flood = 0; ctx.TGS.flood_until = 0
+
+    # ---- pages never wait for Telegram; nothing reloads while you are leaving a page
+    real_messages = fake.messages
+    def slow_messages(*a, **k):
+        time.sleep(2); return real_messages(*a, **k)
+    fake.messages = slow_messages
+    kv = ctx.db(); kv.execute("delete from kv where k like 'tg:fetch:%'"); kv.commit(); kv.close()
+    t0 = time.time(); h = call('/chat?c=tg:u7', raw=True)[1].decode(); dt = time.time() - t0
+    check('a Telegram chat page opens at once even when Telegram takes 2 s', dt < 1 and '看这张' in h and 'data-maxid=' in h, f'{dt:.2f}s')
+    code, d = call('/sync?c=tg:u7&after=999999')
+    check('meanwhile /sync reports the background read', code == 200 and d['running'] is True)
+    settle(); code, d = call('/sync?c=tg:u7&after=999999')
+    check('and when it is done says so', d['running'] is False and d['error'] == '')
+    fake.messages = real_messages
+    top = d['maxid']
+    fake.msgs[('u', 7)].insert(0, dict(id=50, ts=int(time.time()), sender='小明', text='同步来的新消息', media=None, name=''))
+    call(f'/sync?c=tg:u7&after={top}&force=1'); settle()
+    code, d = call(f'/sync?c=tg:u7&after={top}')
+    check('/sync returns only what is new, as ready-made message rows', '同步来的新消息' in d['html'] and d['html'].count('class="m"') == 1 and d['maxid'] > top)
+    check('asking again with the new maxid returns nothing', call(f"/sync?c=tg:u7&after={d['maxid']}")[1]['html'] == '')
+    n_tg = sum(1 for x in fake.calls if isinstance(x, tuple) and x[0] == 'messages')
+    code, d = call('/sync?c=wxid_a&after=0')
+    check('/sync on a WeChat chat reads the local store only', code == 200 and '小王' in d['html'] and sum(1 for x in fake.calls if isinstance(x, tuple) and x[0] == 'messages') == n_tg)
+    fake.flood = 30; ctx.TGS.flood_until = 0
+    call('/sync?c=tg:u7&after=0&force=1'); settle(); code, d = call('/sync?c=tg:u7&after=999999')
+    check('a Telegram error during the background read is shown, not swallowed', d['error'] and d['retry_after'] == 30 and d['running'] is False, str(d))
+    fake.flood = 0; ctx.TGS.flood_until = 0
+    h = call('/', raw=True)[1].decode()
+    check('every page marks a tap as leaving, and the list refresh checks it first', 'window.__leaving=true' in h and 'if(window.__leaving||!on()' in h)
+    check('timed reloads never fire while leaving', 'if(!window.__leaving)location.reload()' in pages.RELOAD3_JS and 'if(!window.__leaving)location.reload()' in pages.RELOAD_JS)
+    h = call('/chat?c=tg:u7', raw=True)[1].decode()
+    check('chat pages do not reload themselves; they merge new messages in place',
+          "if(!chat){setInterval" in h and "tab=chat" in h and '/sync?c=' in h and 'location.reload' not in pages.SYNC_JS)
+    pages.TG_BG['running'] = True
+    h = call('/tg', raw=True)[1].decode()
+    check('Telegram tab while the list is read: a note and a faster check, no 3 s reload loop', '正在更新会话列表' in h and 'fast=1' in h and 'location.reload()},3000' not in h)
+    pages.TG_BG['running'] = False
 
     # ---- search: names + text, highlighted, jumps to the hit even in old history
     c = ctx.db(); c.execute("insert into chats(chat,name,last_local) values('wxid_big','资料群',1)")
@@ -246,7 +292,11 @@ try:
     fake.msgs[('me', 0)] = [dict(id=i, ts=int(time.time()) - 90 * 86400 + i, sender='我', text=f'收藏{i}', media=None, name='') for i in range(300, 0, -1)]
     kv = ctx.db(); kv.execute('delete from msgs where chat="tg:me"'); kv.execute("delete from kv where k like 'tg:%:tg:me'"); kv.commit(); kv.close()
     h = call('/chat?c=tg:me', raw=True)[1].decode()
-    check('Telegram: opening a chat reads only its newest 200', '收藏300' in h and '收藏101' in h and '收藏100' not in h)
+    check('Telegram: a chat never read before opens at once with a "reading" note', '正在从 Telegram 读取最近的消息' in h and 'id="msgs"' in h)
+    settle(); code, d = call('/sync?c=tg:me&after=0')
+    check('Telegram: the background read brings only the newest 200', code == 200 and '收藏300' in d['html'] and '收藏101' in d['html'] and '收藏100' not in d['html'] and d['running'] is False)
+    h = call('/chat?c=tg:me', raw=True)[1].decode()
+    check('Telegram: opened again, the page shows them straight from the cache', '收藏300' in h and '收藏101' in h)
     first_id = int(re.search(r'<div class="m" id="m(\d+)"', h).group(1))
     c = ctx.db(); r = c.execute('select ts, id from msgs where id=?', (first_id,)).fetchone(); c.close()
     code, d = call(f'/older?c=tg:me&ts={r["ts"]}&id={r["id"]}')

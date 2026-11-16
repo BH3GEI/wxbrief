@@ -55,7 +55,7 @@ IK_TEXT = {'ok': '正常', 'deriving': '正在获取', 'none': '尚未获取',
 
 TWO_JS = '<script>' + _asset('two.js') + '</script>'
 
-RELOAD_JS = '<script>setTimeout(function(){location.reload()},5000)</script>'
+RELOAD_JS = '<script>setTimeout(function(){if(!window.__leaving)location.reload()},5000)</script>'
 
 def _key_body(K):
     wx = runenv.wx_label()
@@ -90,6 +90,7 @@ def refresh_btn(to):
             '<button class="btn" type="submit" style="margin:0">刷新</button></form>')
 
 OLDER_JS = '<script>' + _asset('older.js') + '</script>'
+SYNC_JS = '<script>' + _asset('sync.js') + '</script>'
 FOLD_JS = '<script>' + _asset('fold.js') + '</script>'
 
 def snippet(text, q, width=70):
@@ -113,7 +114,7 @@ def tgsearch_page(q):
         else:
             out.append('<p class="sub">Telegram 全部历史里的命中（现查，没有存进库里）</p>')
         for r in hits:
-            out.append(f'<a class="row" href="/chat?c={urllib.parse.quote(r["chat"])}"><div>{snippet(r["text"], q)}</div>'
+            out.append(f'<a class="row" href="/chat?c={urllib.parse.quote(r["chat"])}" data-title="{html.escape(r["chat_name"], quote=True)}"><div>{snippet(r["text"], q)}</div>'
                        f'<div class="sub">{html.escape(r["chat_name"])} · {fmt(r["ts"])}' + (f' · {html.escape(r["sender"])}' if r['sender'] else '') + '</div></a>')
         if not hits and 'err' not in ''.join(out):
             out.append('<p class="sub">没有找到。</p>')
@@ -126,11 +127,11 @@ def search_html(q, source):
     out = []
     chats = api('/api/chats', {'q': [q], 'source': [source], 'limit': ['8']}) if source == 'wechat' else []
     for r in chats:
-        out.append(f'<a class="row" href="/chat?c={urllib.parse.quote(r["chat"])}"><div>{html.escape(r["name"])} <span class="sub">会话</span></div>'
+        out.append(f'<a class="row" href="/chat?c={urllib.parse.quote(r["chat"])}" data-title="{html.escape(r["name"], quote=True)}"><div>{html.escape(r["name"])} <span class="sub">会话</span></div>'
                    f'<div class="sub">{fmt(r["last_ts"])} · {r["n"]} 条</div></a>')
     hits = api('/api/search', {'q': [q], 'source': [source], 'limit': ['50']})
     for r in hits:
-        out.append(f'<a class="row" href="/chat?c={urllib.parse.quote(r["chat"])}&around={r["id"]}#m{r["id"]}"><div>{snippet(r["text"], q)}</div>'
+        out.append(f'<a class="row" href="/chat?c={urllib.parse.quote(r["chat"])}&around={r["id"]}#m{r["id"]}" data-title="{html.escape(r["chat_name"], quote=True)}"><div>{snippet(r["text"], q)}</div>'
                    f'<div class="sub">{html.escape(r["chat_name"])} · {fmt(r["ts"])}</div></a>')
     if not out:
         out.append('<p class="sub">没有找到。</p>')
@@ -169,14 +170,14 @@ def home(K, q):
         if not any(r['chat'] == 'filehelper' for r in rows):          # may be older than the 200 most recent chats
             rows += [r for r in api('/api/chats', {'q': ['filehelper'], 'source': ['wechat'], 'limit': ['5']}) if r['chat'] == 'filehelper']
         for r in pin_first(rows):
-            out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}"><div>{html.escape(r["name"])}{pin_tag(r)}</div>'
+            out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}" data-title="{html.escape(r["name"], quote=True)}"><div>{html.escape(r["name"])}{pin_tag(r)}</div>'
                        f'<div class="sub">{fmt(r["last_ts"])} · {r["n"]} 条</div></a>')
     out.append(f'<p class="sub">读取于 {fmt(STATE["last_ingest"])} · {auto_toggle()}</p>')
     return page('微信', ''.join(out), 'tab=wx')
 
 TG_BG = {'running': False, 'error': ''}
 
-RELOAD3_JS = '<script>setTimeout(function(){location.reload()},3000)</script>'
+RELOAD3_JS = '<script>setTimeout(function(){if(!window.__leaving)location.reload()},3000)</script>'
 
 def _tg_refresh_bg():
     if TG_BG['running']:
@@ -191,6 +192,49 @@ def _tg_refresh_bg():
             TG_BG['running'] = False
     threading.Thread(target=go, daemon=True).start()
 
+SYNC = {}                  # chat id -> {'running', 'at', 'error', 'retry_after'}
+SYNC_LOCK = threading.Lock()
+
+def start_sync(cid, force=False):
+    """Read a Telegram chat in the background (at most one read per chat at a time)."""
+    with SYNC_LOCK:
+        st = SYNC.setdefault(cid, {'running': False, 'at': 0, 'error': '', 'retry_after': None})
+        if st['running'] or (not force and time.time() - st['at'] < 5):
+            return st
+        st['running'] = True
+    def go():
+        try:
+            ctx.TGS.fetch(cid, force=force)
+            st['error'], st['retry_after'] = '', None
+        except tg.TGError as e:
+            st['error'], st['retry_after'] = e.msg, e.retry_after
+        except Exception as e:
+            st['error'], st['retry_after'] = str(e)[:120], None
+        finally:
+            st['at'] = time.time(); st['running'] = False
+    threading.Thread(target=go, daemon=True).start()
+    return st
+
+def sync_part(q):
+    """GET /sync (page only): start a background read if due, and return the messages stored after `after`."""
+    cid = q.get('c', [''])[0]
+    try:
+        after = int(q.get('after', ['0'])[0] or 0)
+    except ValueError:
+        after = 0
+    if tg.is_tg(cid):
+        start_sync(cid, force=q.get('force', [''])[0] == '1')
+    c = db()
+    try:
+        rows = c.execute('select m.*, coalesce(ch.name, m.chat) name from msgs m left join chats ch on ch.chat=m.chat '
+                         'where m.chat=? and m.id>? order by m.ts, m.id limit 500', (cid, after)).fetchall()
+        top = c.execute('select coalesce(max(id),0) from msgs where chat=?', (cid,)).fetchone()[0]
+    finally:
+        c.close()
+    st = SYNC.get(cid) or {}
+    return {'html': ''.join(msg_html(r) for r in rows_json(rows)), 'maxid': top, 'running': bool(st.get('running')),
+            'error': st.get('error') or '', 'retry_after': st.get('retry_after')}
+
 def bots_fold():
     """The agent topics as one folded row at the top of the Telegram tab (display only)."""
     topics = ctx.BOTS.list() if ctx.BOTS else []
@@ -204,7 +248,7 @@ def bots_fold():
             last_in = c.execute("select coalesce(max(id),0) from msgs where chat=? and sender != '我'", (t['chat'],)).fetchone()[0]
             if m and m['ts'] > latest[0]:
                 latest = (m['ts'], f"{t['name']}：{(m['text'] or '')[:30]}")
-            row = (f'<a class="row" href="/chat?c={urllib.parse.quote(t["chat"])}" data-chat="{html.escape(t["chat"])}" data-last="{last_in}">'
+            row = (f'<a class="row" href="/chat?c={urllib.parse.quote(t["chat"])}" data-chat="{html.escape(t["chat"])}" data-last="{last_in}" data-title="{html.escape(t["name"], quote=True)}">'
                    f'<div>{html.escape(t["name"])}</div><div class="sub">{fmt(t["last_activity"])}' +
                    (f' · {html.escape((m["text"] or "")[:40])}' if m else '') + '</div></a>')
             (closed_rows if t['status'] == 'closed' else open_rows).append(row)
@@ -244,7 +288,7 @@ def tg_home(q):
         if r is None:
             break
         mark = {'u': '', 'g': '群 · ', 'c': '频道 · ', 'me': ''}.get(r['kind'], '')
-        out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}"><div>{html.escape(r["name"] or r["chat"])}{pin_tag(r)}</div>'
+        out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}" data-title="{html.escape(r["name"] or r["chat"], quote=True)}"><div>{html.escape(r["name"] or r["chat"])}{pin_tag(r)}</div>'
                    f'<div class="sub">{mark}{fmt(r["last_ts"])}' + (f' · 已读取 {r["n"]} 条' if r['n'] else '') + '</div></a>')
     if raw_q and shown:
         out.append('<p class="sub" style="margin-top:10px">会话</p>')
@@ -259,10 +303,9 @@ def tg_home(q):
                    ''.join(f'<div class="m"><span class="sub">{fmt(x["ts"])} · {html.escape(x["chat_name"] or x["chat"])} · '
                            f'{"直接发送" if x["via"] == "direct" else "你确认后发送"}</span><br>{html.escape(x["body"])}</div>' for x in sent) +
                    '</details>')
-    if TG_BG['running']:
-        out.append(RELOAD3_JS)
-    out.append(f'<p class="sub">{auto_toggle()}</p>')
-    return page('Telegram', ''.join(out), 'tab=tg')
+    out.append(f'<p class="sub">{auto_toggle()}' + (' · 正在更新会话列表…' if TG_BG['running'] else '') + '</p>')
+    # while the list is being read, check every 2 s instead of 10 s; the page reloads once, when it is ready
+    return page('Telegram', ''.join(out), 'tab=tg' + ('&fast=1' if TG_BG['running'] else ''))
 
 def chat(q):
     cid = q.get('c', [''])[0]
@@ -272,7 +315,7 @@ def chat(q):
     isbot = tgbot.is_bot(cid)
     back = '/tg' if tg.is_tg(cid) or isbot else '/'
     here = '/chat?c=' + urllib.parse.quote(cid)
-    out = [f'<div class="top"><a class="sub" href="{back}">← 返回</a><span>{auto_toggle()} {refresh_btn(here)}</span></div><h3>{html.escape(name)}</h3>']
+    out = [f'<div class="top"><a class="sub back" href="{back}">← 返回</a><span>{auto_toggle()} {refresh_btn(here)}</span></div><h3>{html.escape(name)}</h3>']
     if isbot and ctx.BOTS:
         t = ctx.BOTS.get(cid) or {}
         out.append(f"<p class=\"sub\">{html.escape(t.get('holder_name') or '')} 开的话题 · 用途：{html.escape(t.get('purpose') or '')} · "
@@ -291,18 +334,17 @@ def chat(q):
             params = {'chat': [cid], 'since': [str((lo if lo is not None else t['ts']) - 1)], 'limit': ['300']}
         out.append(f'<p class="sub"><a class="file" href="/chat?c={urllib.parse.quote(cid)}">跳到最新消息 ↓</a></p>')
     if tg.is_tg(cid):
-        try:
-            ctx.TGS.fetch(cid)
-        except tg.TGError as e:
-            out.append(f'<div class="err">现在读不到 Telegram 的新消息：{html.escape(e.msg)}'
-                       + (f'（{e.retry_after} 秒后再试）' if e.retry_after else '') + '。下面是已缓存的。</div>')
+        start_sync(cid)             # never wait for Telegram here: the page shows the cache now, sync.js adds what arrives
         params['live'] = ['0']
-    out.append(f'<div id="olderbar" class="sub" style="text-align:center;height:22px;line-height:22px"></div><div id="msgs" data-chat="{html.escape(cid, quote=True)}">')
-    for r in sorted(api('/api/messages', params), key=lambda r: (r['ts'], r['id'])):
+    c = db(); top = c.execute('select coalesce(max(id),0) from msgs where chat=?', (cid,)).fetchone()[0]; c.close()
+    rows = sorted(api('/api/messages', params), key=lambda r: (r['ts'], r['id']))
+    out.append(f'<div id="olderbar" class="sub" style="text-align:center;height:22px;line-height:22px"></div>'
+               f'<div id="msgs" data-chat="{html.escape(cid, quote=True)}" data-maxid="{top}">')
+    for r in rows:
         out.append(msg_html(r))
-    out.append('</div>' + OLDER_JS)
+    waiting = '正在从 Telegram 读取最近的消息…' if tg.is_tg(cid) and not rows else ''
+    out.append(f'</div><div id="syncnote" class="sub syncnote"{"" if waiting else " hidden"}>{waiting}</div>' + OLDER_JS + SYNC_JS)
     if isbot:      # remember what has been read, for the unread badge on the folded bot row
-        c = db(); top = c.execute('select coalesce(max(id),0) from msgs where chat=?', (cid,)).fetchone()[0]; c.close()
         out.append(f"<script>try{{localStorage.setItem({json.dumps('wxb_seen_' + cid)},'{top}')}}catch(e){{}}</script>")
     return page(name, ''.join(out), 'tab=chat&c=' + urllib.parse.quote(cid))
 
@@ -360,7 +402,7 @@ KEYS_JS = '<script>' + _asset('keys.js') + '</script>'
 
 def keys_page(base, new_id=None):
     e = html.escape
-    out = ['<p><a class="sub" href="/">← 返回</a></p><h3>API key 管理</h3>',
+    out = ['<p><a class="sub back" href="/">← 返回</a></p><h3>API key 管理</h3>',
            '<p class="sub">每个 agent 用一个 key。泄露了就“重置”（换新 key，名字不变），不用了就“吊销”。每个 key 下面是一行给 agent 的说明（已含 key），复制给 agent 即可。'
            '每个 key 有三份说明：<b>全部</b>、<b>微信</b>、<b>Telegram</b>，按这个 agent 要用的范围选一份复制（只是告诉它怎么用，key 本身的权限不变）。完整用法见 <a class="file" href="/api/help">/api/help</a>。</p>']
     keys = ctx.APIKEYS.list()
@@ -426,15 +468,9 @@ def do_refresh(to):
     if path == '/chat':
         cid = parse_qs(qs).get('c', [''])[0]
         if tg.is_tg(cid):
-            try:
-                ctx.TGS.fetch(cid, force=True)
-            except tg.TGError:
-                pass                       # the chat page itself shows why it could not refresh
+            start_sync(cid, force=True)    # in the background: the page opens at once and shows what arrives
     elif path == '/tg':
-        try:
-            ctx.TGS.dialogs(force=True)
-        except tg.TGError:
-            pass
+        _tg_refresh_bg()
     else:
         INGEST_NOW.set(); time.sleep(2)    # let the WeChat reader run once
     return to
@@ -444,7 +480,7 @@ TG_CHECK = {'running': False, 'at': 0, 'error': ''}
 def settings_page(K):
     st = ctx.TGS.status()
     e = html.escape
-    out = ['<p><a class="sub" href="/">← 返回</a></p><h3>设置</h3>']
+    out = ['<p><a class="sub back" href="/">← 返回</a></p><h3>设置</h3>']
     out.append('<div class="sec"><h3>' + runenv.wx_label() + '密钥</h3>' + _key_body(K) + '</div>')
     t = ['<div class="sec"><h3>Telegram</h3>']
     state = st['state']
@@ -514,7 +550,7 @@ def bots_settings():
         else:
             what = '建一个群（bot 已经有了：@' + e(sm['bot']) + '）' if sm['bot'] else '建一个 bot 和一个群'
             out.append(f'<form class="two" method="post" action="/bots/setup"><button class="pri" data-ask="再点一次：用你的 Telegram 账号{what}">建立</button></form>')
-    if sm['note'] and not (sm['ready'] and sm['note'] == '已建好'):
+    if sm['note'] and sm['note'] != '已建好':      # "已建好" is said by the line above; when not ready it is stale
         out.append(f'<p class="sub">进度：{e(sm["note"])}</p>')
     out.append('<form method="post" action="/bots/config" style="margin-top:12px">'
                f'<label class="sub">话题闲置多久自动关闭（小时）</label><input name="idle_hours" inputmode="numeric" value="{sm["idle_hours"]}">'

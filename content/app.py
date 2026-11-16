@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ven
 import runenv, ctx, wxdb, media, apikeys, keys as keymod, tg, tgbot
 from api import api, api_send, draft_create, draft_dismiss, draft_get, draft_list, help_text, tg_reply, wait_new
 from ctx import STATE, VAR, WECHAT, db, init_store, log
-from pages import base_url, chat, do_refresh, home, keys_page, older_page, page, ping_version, settings_page, tg_home, tgsearch_page
+from pages import base_url, chat, do_refresh, home, keys_page, older_page, page, ping_version, settings_page, sync_part, tg_home, tgsearch_page
 from wechat import VOICES, account_dir, ingest_loop
 
 
@@ -119,6 +119,7 @@ def make_handler(K):
                 elif u.path == '/tg': self.send(tg_home(q))
                 elif u.path == '/tgsearch': self.send(tgsearch_page(q.get('q', [''])[0]))
                 elif u.path == '/ping': self.send(json.dumps({'v': ping_version(K, q)}), ctype='application/json')
+                elif u.path == '/sync': self.send(json.dumps(sync_part(q), ensure_ascii=False), ctype='application/json; charset=utf-8')
                 elif u.path == '/older':
                     try:
                         res = older_page(q.get('c', [''])[0], int(q.get('ts', ['0'])[0]), int(q.get('id', ['0'])[0]))

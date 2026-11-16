@@ -189,6 +189,10 @@ try:
     api.dead.add(tok6); b6._forget_deleted_bot()
     check('the periodic check notices a deleted bot: no longer ready', not b6.ready() and not b6._load().get('bot'))
     check('and the page says why, instead of a stale "已建好"', '已被删除' in b6.note)
+    ctx.BOTS.note = '已建好'; real_ready = ctx.BOTS.ready; ctx.BOTS.ready = lambda: False
+    h = call('/settings', raw=True)[1]
+    check('a stale "已建好" is never shown next to the setup button', '进度：已建好' not in h and '建立' in h)
+    ctx.BOTS.ready = real_ready
 
     # ---------------- opening topics
     code, t1 = call('/api/bots', 'POST', {'purpose': '日报'})

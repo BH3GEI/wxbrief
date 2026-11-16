@@ -35,3 +35,18 @@ html.busy:before{content:"";position:fixed;top:0;left:0;height:3px;width:100%;ba
 .badge{background:var(--warn);color:var(--bg);border-radius:999px;font-size:12px;padding:0 7px;margin-left:6px}
 #botlist .row{padding-left:18px}.row.unread>div:first-child{font-weight:600}
 button:disabled{opacity:.6;cursor:default}
+
+.row{transition:background .12s}.row:active,.row.pressed{background:color-mix(in srgb,var(--acc) 14%,transparent)}
+.shell{position:fixed;inset:0;z-index:97;background:var(--bg);transform:translateX(100%);transition:transform .2s cubic-bezier(.2,.8,.2,1);overflow:hidden}
+.shell.from-left{transform:translateX(-35%);opacity:.5;transition:transform .2s cubic-bezier(.2,.8,.2,1),opacity .2s}
+.shell.in{transform:none;opacity:1}
+.shell-in{max-width:640px;margin:0 auto;padding:12px 16px}
+.shell-top{display:flex;gap:10px;align-items:center;min-height:34px;padding:4px 0 10px;border-bottom:1px solid var(--line)}
+.sk{height:12px;border-radius:6px;background:var(--line);margin:22px 0;animation:skp .9s ease-in-out infinite alternate}
+.sk:nth-child(3n){width:62%}.sk:nth-child(3n+1){width:88%}.sk:nth-child(3n+2){width:44%}
+@keyframes skp{from{opacity:.4}to{opacity:1}}
+main.enter{animation:pgin .16s ease-out}main.enter-back{animation:pgback .16s ease-out}
+@keyframes pgin{from{opacity:.35;transform:translateX(14px)}to{opacity:1;transform:none}}
+@keyframes pgback{from{opacity:.35;transform:translateX(-14px)}to{opacity:1;transform:none}}
+.syncnote{text-align:center;padding:10px 0}
+@media (prefers-reduced-motion:reduce){.shell,.shell.from-left{transition:none}main.enter,main.enter-back,.sk{animation:none}}

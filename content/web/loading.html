@@ -1,13 +1,33 @@
 <div id="ld" hidden><span class="spin"></span><span id="ldt">加载中…</span></div>
 <script>(function(){var ld=document.getElementById('ld'),tm,to;
-function on(t){clearTimeout(tm);clearTimeout(to);document.documentElement.classList.add('busy');
+/* Navigation feedback. Any tap that leaves the page sets window.__leaving, which stops every automatic reload
+   (auto refresh, progress polling): a reload must never cancel the page the user asked for. */
+function bar(){document.documentElement.classList.add('busy')}
+function on(t){clearTimeout(tm);clearTimeout(to);bar();
  document.getElementById('ldt').textContent=t||'加载中…';tm=setTimeout(function(){ld.hidden=false},350);to=setTimeout(off,60000)}
-function off(){clearTimeout(tm);clearTimeout(to);ld.hidden=true;document.documentElement.classList.remove('busy');
+function off(){clearTimeout(tm);clearTimeout(to);ld.hidden=true;document.documentElement.classList.remove('busy');window.__leaving=false;
+ var s=document.getElementById('shell');if(s)s.remove();
+ [].forEach.call(document.querySelectorAll('.pressed'),function(x){x.classList.remove('pressed')});
  [].forEach.call(document.querySelectorAll('button[data-was]'),function(b){b.textContent=b.dataset.was;b.disabled=false;delete b.dataset.was})}
-document.addEventListener('submit',function(e){if(e.defaultPrevented)return;var f=e.target,b=e.submitter||(f.querySelector&&f.querySelector('button'));
+function shell(title,back){var old=document.getElementById('shell');if(old)old.remove();
+ var s=document.createElement('div');s.id='shell';s.className='shell'+(back?' from-left':'');
+ s.innerHTML='<div class="shell-in"><div class="shell-top"><span class="sub">←</span><b></b></div>'+new Array(7).join('<div class="sk"></div>')+'</div>';
+ s.querySelector('b').textContent=title||'';document.body.appendChild(s);
+ requestAnimationFrame(function(){requestAnimationFrame(function(){s.classList.add('in')})});
+ to=setTimeout(off,60000)}
+document.addEventListener('submit',function(e){if(e.defaultPrevented)return;window.__leaving=true;
+ var f=e.target,b=e.submitter||(f.querySelector&&f.querySelector('button'));
  on(f.dataset&&f.dataset.busy);if(b&&!b.dataset.was){setTimeout(function(){b.dataset.was=b.textContent;b.textContent='处理中…';b.disabled=true},0)}});
 document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[href]');
- if(!a||e.defaultPrevented||e.metaKey||e.ctrlKey||e.shiftKey||a.target==='_blank')return;
- var h=a.getAttribute('href')||'';if(!h||h.charAt(0)==='#'||/^(mailto|tel):/.test(h))return;
- if(h.indexOf('/media/')>-1&&!a.querySelector('img')){on('正在下载…');setTimeout(off,20000);return}on()});
-window.addEventListener('pageshow',function(e){if(e.persisted)off()})})()</script>
+ if(!a||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||a.target==='_blank')return;
+ var h=a.getAttribute('href')||'';if(!h||h.charAt(0)==='#'||!/^\//.test(h)||h.charAt(1)==='/')return;   /* same-site pages only */
+ if(h.indexOf('/media/')>-1){if(!a.querySelector('img')){on('正在下载…');setTimeout(off,20000)}return}   /* a download, not a page */
+ window.__leaving=true;a.classList.add('pressed');bar();
+ var back=a.classList.contains('back'),tab=!!a.closest('.tabs');
+ var title=a.dataset.title||(tab||back?'':((a.querySelector('div')||a).textContent||'').trim().slice(0,40));
+ shell(title,back);
+ try{sessionStorage.setItem('wxb_nav',back?'back':'fwd')}catch(_){}});
+window.addEventListener('pageshow',function(e){if(e.persisted)off()});
+try{var n=sessionStorage.getItem('wxb_nav');if(n){sessionStorage.removeItem('wxb_nav');var m=document.querySelector('main');
+ if(m)m.classList.add(n==='back'?'enter-back':'enter')}}catch(_){}
+})()</script>
