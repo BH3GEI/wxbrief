@@ -28,6 +28,20 @@ class Fake:
         ms = [m for m in self.msgs.get((ref[0], ref[1]), []) if m['id'] > min_id and (not offset_id or m['id'] < offset_id) and m['ts'] >= since]
         ms.sort(key=lambda m: -m['id'])            # newest first, like Telegram
         return ms[:limit]
+    def search(self, ref, q, limit):
+        self.calls.append(('search', ref, q))
+        if self.flood: raise tg.TGError('rate_limited', 'x', self.flood)
+        ids = {('u', 7): 'tg:u7', ('g', 9): 'tg:g9', ('me', 0): 'tg:me'}
+        out = []
+        for peer, ms in self.msgs.items():
+            if ref and (ref[0], ref[1]) != peer: continue
+            for m in ms:
+                if q.lower() in m['text'].lower(): out.append(dict(m, chat=ids.get(peer, 'tg:u1'), media=m.get('media')))
+        out += [dict(id=900 + i, chat='tg:u7', ts=int(time.time()) - 900 * 86400, sender='小明', text=f'很久以前的{q}{i}', media=None, name='') for i in range(2)] if q == '很久以前' and (not ref or ref[0] == 'u') else []
+        return out[:limit]
+    def contacts(self):
+        self.calls.append('contacts')
+        return [('tg:u7', '小明', 'xiaoming', 111), ('tg:u50', '没聊过的人', 'nochat', 222)]
     def send(self, ref, text): self.sent.append((ref, text)); return 99, int(time.time())
     def download(self, ref, mid, destdir):
         self.calls.append(('download', mid))

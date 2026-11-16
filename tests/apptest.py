@@ -90,7 +90,6 @@ try:
     # ---- errors are structured
     fake.flood = 30; app.TGS.flood_until = 0
     code, e = call('/api/messages?chat=tg:u7&days=1&limit=5')   # cached fresh -> no call
-    app.TGS.set_config(); os.system('true')
     import tg as _t
     kv = app.db(); kv.execute("delete from kv where k like 'tg:fetch:%'"); kv.commit(); kv.close()
     code, e = call('/api/messages?chat=tg:u7')
@@ -253,6 +252,56 @@ try:
     code, d = call(f'/older?c=tg:me&ts={r["ts"]}&id={r["id"]}')
     check('Telegram: rate limit while scrolling gives a message the page can show', d.get('error') == 'rate_limited' and d.get('retry_after') == 30 and 'message' in d, str(d))
     fake.flood = 0; app.TGS.flood_until = 0
+
+    # ---- contacts
+    c = app.db()
+    app.save_contacts(c, [('wxid_a', '老王', '王哥', 'wang01', 1), ('wxid_big', '', '资料群友', None, 1), ('chat9@chatroom', '', '读书群', None, 2),
+                          ('gh_news', '', '某公众号', None, 4), ('wxid_nobody', '', '从没聊过', None, 1), ('weixin', '', '微信团队', None, 4),
+                          ('wxid_member', '', '群里见过的人', None, 3)])
+    c.close()
+    code, cs = call('/api/contacts?source=wechat')
+    names = {x['id']: x for x in cs}
+    check('WeChat contacts: people and groups by default, official accounts and system entries hidden',
+          code == 200 and {'wxid_a', 'wxid_nobody', 'chat9@chatroom'} <= set(names) and not ({'gh_news', 'weixin'} & set(names)))
+    check('kind=other reaches official accounts, kind=all everything', [x['id'] for x in call('/api/contacts?source=wechat&kind=other')[1]].count('gh_news') == 1
+          and {'gh_news', 'weixin', 'wxid_a'} <= {x['id'] for x in call('/api/contacts?source=wechat&kind=all')[1]})
+    w = names['wxid_a']
+    check('a contact carries name, remark, nickname, alias and the chat id', w['name'] == '老王' and w['remark'] == '老王' and w['nickname'] == '王哥' and w['alias'] == 'wang01' and w['chat'] == 'wxid_a' and w['kind'] == 'person')
+    check('the raw WeChat type is returned and can be filtered on', w['type'] == 1 and [x['id'] for x in call('/api/contacts?source=wechat&type=3')[1]] == ['wxid_member'])
+    check('people only met in groups (type 3) are hidden by default, shown with kind=all', 'wxid_member' not in names and 'wxid_member' in {x['id'] for x in call('/api/contacts?source=wechat&kind=all')[1]})
+    check('group chats (type 2) are in the default list', names['chat9@chatroom']['type'] == 2)
+    check('has_chat tells people you talked to from people you never did', w['has_chat'] is True and names['wxid_nobody']['has_chat'] is False)
+    check('search by remark, nickname, alias', all([x['id'] for x in call('/api/contacts?source=wechat&q=' + up.quote(q))[1]] == ['wxid_a'] for q in ('老王', '王哥', 'WANG01')))
+    code, tc = call('/api/contacts?source=telegram')
+    check('Telegram contacts include people you never opened a chat with', code == 200 and {x['id'] for x in tc} == {'tg:u7', 'tg:u50'})
+    t7 = next(x for x in tc if x['id'] == 'tg:u7'); t50 = next(x for x in tc if x['id'] == 'tg:u50')
+    check('Telegram contact has @username, has_chat is accurate', t7['username'] == 'xiaoming' and t7['has_chat'] is True and t50['has_chat'] is False and t50['source'] == 'telegram')
+    check('no phone numbers anywhere in the contact data', 'phone' not in json.dumps(tc).lower())
+    check('search Telegram contacts by @username', [x['id'] for x in call('/api/contacts?source=telegram&q=@NoChat')[1]] == ['tg:u50'])
+    n0 = fake.calls.count('contacts'); call('/api/contacts?source=telegram'); call('/api/contacts')
+    check('the Telegram address book is cached', fake.calls.count('contacts') == n0)
+    check('no source: both platforms in one list', {x['source'] for x in call('/api/contacts')[1]} == {'wechat', 'telegram'})
+    check('contacts need a key', call('/api/contacts', auth=False)[0] == 401)
+
+    # ---- Telegram live search
+    c = app.db(); n_before = c.execute('select count(*) from msgs').fetchone()[0]; c.close()
+    code, lv = call('/api/search?q=' + up.quote('很久以前') + '&source=telegram&live=1')
+    check('live search through the API reaches history that is not cached', code == 200 and len(lv) == 2 and all(x['live'] and x['message_id'] and 'id' not in x for x in lv), str(lv)[:200])
+    code, cached = call('/api/search?q=' + up.quote('很久以前') + '&source=telegram')
+    check('the normal search still only sees the cache', code == 200 and cached == [])
+    c = app.db(); check('live search does not change the database', c.execute('select count(*) from msgs').fetchone()[0] == n_before); c.close()
+    code, one = call('/api/search?q=' + up.quote('很久以前') + '&chat=tg:u7&live=1&limit=1')
+    check('live search can be limited to a chat and a count', code == 200 and len(one) == 1 and one[0]['chat'] == 'tg:u7')
+    code, bad = call('/api/search?q=&source=telegram&live=1'); check('empty keyword is a clear 400', code == 400 and bad['error'] == 'empty')
+    fake.flood = 30; app.TGS.flood_until = 0
+    code, bad = call('/api/search?q=' + up.quote('没搜过的词') + '&source=telegram&live=1')
+    check('live search rate limit -> 429 with retry_after', code == 429 and bad['retry_after'] == 30)
+    fake.flood = 0; app.TGS.flood_until = 0
+    h = call('/tgsearch?q=' + up.quote('很久以前'), raw=True)[1].decode()
+    check('Telegram search page lists hits with the match highlighted', '<mark>很久以前</mark>' in h and '没有存进库里' in h)
+    h = call('/tg?q=' + up.quote('很久以前'), raw=True)[1].decode()
+    check('Telegram tab offers the full-history search after the cached results', '在 Telegram 里搜全部历史' in h and '/tgsearch?q=' in h)
+    check('WeChat help does not mention live search, Telegram help does', 'live=1' not in call('/api/help?for=wechat', auth=False)[1] and 'live=1' in call('/api/help?for=telegram', auth=False)[1])
 
     # ---- login state shown on settings
     fake.st = 'logged_out'; os.remove(TMP + '/tg.session')

@@ -141,9 +141,10 @@ def main():
         os.makedirs(d, exist_ok=True)
 
     cp = os.path.join(ROOT, 'contact_plain.db')
-    raw_db(cp, ['create table contact(username text, remark text, nick_name text);',
+    raw_db(cp, ['create table contact(username text, remark text, nick_name text, alias text, local_type int);',
                 'create table stranger(username text, nick_name text);',
-                'insert into contact values ("wxid_friend1", "老王", "王哥"), ("chat1@chatroom", "", "群聊");',
+                'insert into contact values ("wxid_friend1", "老王", "王哥", "wang01", 1), ("chat1@chatroom", "", "群聊", NULL, 2),'
+                ' ("gh_news", "", "某公众号", NULL, 4);',
                 'insert into stranger values ("wxid_stranger1", "路人");'])
     key1 = os.urandom(32)
     salt1 = encrypt_db(cp, key1, os.path.join(ACC, 'db_storage', 'contact', 'contact.db'))
@@ -200,6 +201,12 @@ def main():
         assert any('文件' in x and '报告.pdf' in x for x in texts), 'file message missing'
         assert get('/api/search?q=' + urllib.parse.quote('文件')), 'search empty'
         print('messages/search OK')
+        cs = {c['id']: c for c in get('/api/contacts?source=wechat')}
+        assert cs['wxid_friend1']['remark'] == '老王' and cs['wxid_friend1']['alias'] == 'wang01' and cs['wxid_friend1']['type'] == 1, cs
+        assert cs['chat1@chatroom']['kind'] == 'group' and cs['chat1@chatroom']['has_chat'] is True, cs
+        assert 'gh_news' not in cs, 'official account shown by default'
+        assert [c['id'] for c in get('/api/contacts?source=wechat&q=wang01')] == ['wxid_friend1']
+        print('contacts OK (read from the encrypted contact database)')
 
         payload = json.dumps({'chat': chat, 'body': '在的，稍等我看一下', 'note': '由测试写入'}).encode()
         req = urllib.request.Request(base + '/api/drafts', data=payload, method='POST',

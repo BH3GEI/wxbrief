@@ -182,6 +182,28 @@ try:
     s.fetch('tg:u8', days=30)
     check('a chat with no messages at all is marked as fully read', s.at_start('tg:u8') and ids('tg:u8') == [])
 
+    # ---- live search: Telegram's own search over the whole history, returned but never stored
+    f.msgs[('u', 7)].insert(0, dict(id=8, ts=int(time.time()) - 5, sender='小明', text='', media='img', name=''))
+    c = db(); before = c.execute('select count(*) from msgs').fetchone()[0]; c.close()
+    r = s.search_live('很久以前')
+    check('live search finds old messages that were never cached', len(r) == 2 and all('很久以前' in x['text'] for x in r))
+    check('hits carry message_id, chat, chat name, time, sender and are marked live', r[0]['message_id'] and r[0]['chat'] == 'tg:u7' and r[0]['chat_name'] == '小明' and r[0]['live'] is True and r[0]['ts'] and r[0]['sender'] == '小明')
+    c = db(); after = c.execute('select count(*) from msgs').fetchone()[0]; c.close()
+    check('live search stores nothing (ids and the cache stay as they were)', before == after)
+    k = n_calls(); s.search_live('很久以前')
+    check('the same search within a minute is answered from memory', sum(1 for x in f.calls if isinstance(x, tuple) and x[0] == 'search') == 1)
+    r2 = s.search_live('很久以前', chat='tg:u7')
+    check('a search can be limited to one chat', len(r2) == 2 and all(x['chat'] == 'tg:u7' for x in r2) and f.calls[-1][1][:2] == ('u', 7))
+    check('limit is respected', len(s.search_live('msg', limit=1)) == 1)
+    try: s.search_live('   '); check('empty keyword refused', False)
+    except tg.TGError as e: check('empty keyword refused', e.code == 'empty')
+    f.flood = 30; s.flood_until = 0
+    try: s.search_live('另一个词'); check('rate limit on search is reported', False)
+    except tg.TGError as e: check('rate limit on search is reported with retry_after', e.code == 'rate_limited' and e.retry_after == 30)
+    f.flood = 0; s.flood_until = 0
+    r3 = s.search_live('不存在的词xyz')
+    check('no hits is an empty list, not an error', r3 == [])
+
     # adapter state: a successful read proves the login, housekeeping calls do not
     import asyncio
     live = tg.Live(lambda *a: None)

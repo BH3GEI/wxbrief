@@ -47,7 +47,16 @@ DELETE /api/drafts/<id>    忽略一条
 - **媒体懒加载**：默认只有占位，请求 `/api/media/<id>` 才下载；缓存超过 30 天或 2GB 自动清理。
 - **发送**：`POST /api/send {chat, text}`。发给 `tg:me` 直接发出；发给其他会话只会写入草稿，由本人在网页上点两次确认后才发送。API 本身没有其他写操作，也没有删除账号等敏感能力。
 - 限流时返回 `429 {"error":"rate_limited","retry_after":秒}`。
+- **现查搜索**：`/api/search?q=…&source=telegram&live=1`（可加 `&chat=`）直接向 Telegram 搜全部历史，结果只返回、不存库。
+
+## 通讯录
+
+`GET /api/contacts?q=&source=&kind=&type=`：微信和 Telegram 的通讯录（含没聊过的人），带 `has_chat`、`chat`（会话 ID）。Telegram 不读手机号。微信的表里保存了见过的所有人，默认只返回好友和群（内部类型 1、2）；类型 3 是在群里见过的人，`type=3` 或 `kind=all` 才返回。
 - `/api/help?for=wechat|telegram|all` 给 agent 的说明；API key 页每个 key 提供三份可复制的说明。
+
+## 懒猫部署：软件包随包携带
+
+安装包里带着应用需要的全部 Alpine 软件包（`content/apk`，python3、ffmpeg、gdb 等，由 `fetch-apk.sh` 在打包时下载），容器启动时只从包里安装并由 apk 校验签名，**运行时不联网下载任何东西**。第一次打包需要 docker；下载好的文件保存在 `vendor-src/apk`，之后的打包不再需要。要更新软件包，删掉 `vendor-src/apk` 重新打包。
 
 ## 懒猫部署的权限拆分
 

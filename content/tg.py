@@ -290,6 +290,49 @@ class Live:
             return out
         return self._run(go(), 60, login=True)
 
+    def search(self, ref, q, limit):
+        """Server-side search: inside one chat (ref) or across all chats (ref None). Not stored anywhere."""
+        async def go():
+            from telethon import utils
+            from telethon.tl import types
+            c = await self._client()
+            me = await c.get_me()
+            out = []
+            async for m in c.iter_messages(self._peer(ref) if ref else None, search=q, limit=limit):
+                pid = m.peer_id
+                if isinstance(pid, types.PeerUser):
+                    cid = 'tg:me' if pid.user_id == me.id else f'tg:u{pid.user_id}'
+                elif isinstance(pid, types.PeerChat):
+                    cid = f'tg:g{pid.chat_id}'
+                elif isinstance(pid, types.PeerChannel):
+                    cid = ('tg:g' if m.is_group else 'tg:c') + str(pid.channel_id)
+                else:
+                    continue
+                s = m.sender
+                who = '我' if (s is not None and getattr(s, 'id', None) == me.id) else (utils.get_display_name(s) if s else '')
+                kind, name = None, ''
+                if m.photo:
+                    kind = 'img'
+                elif m.voice:
+                    kind = 'voice'
+                elif m.video or m.video_note or m.gif:
+                    kind, name = 'vid', (m.file.name if m.file and m.file.name else '')
+                elif m.document and not m.sticker:
+                    kind, name = 'file', (m.file.name if m.file and m.file.name else 'file')
+                out.append(dict(id=m.id, chat=cid, ts=int(m.date.timestamp()), sender=who, text=(m.message or ''), media=kind, name=name))
+            return out
+        return self._run(go(), 60, login=True)
+
+    def contacts(self):
+        """The address book: (chat id, name, username, access_hash). Phone numbers are deliberately not read."""
+        async def go():
+            from telethon.tl import functions
+            c = await self._client()
+            res = await c(functions.contacts.GetContactsRequest(hash=0))
+            return [(f'tg:u{u.id}', ' '.join(x for x in (u.first_name, u.last_name) if x) or u.username or str(u.id),
+                     u.username, u.access_hash) for u in getattr(res, 'users', [])]
+        return self._run(go(), 60, login=True)
+
     def send(self, ref, text):
         async def go():
             c = await self._client()
@@ -331,6 +374,7 @@ class Service:
         self.adapter = adapter or Live(log)
         self.adapter.on_session = self._save_session
         self.flood_until = 0
+        self._live = {}
         self.me_name = ''
         self.lock = threading.RLock()
         self._apply()
@@ -488,6 +532,55 @@ class Service:
         if r is None:
             raise TGError('unknown_chat', '没有这个 Telegram 会话，先刷新会话列表')
         return (kind, i, r[0])
+
+    # -- live search (Telegram's own search over the whole history; results are returned, never stored)
+    def search_live(self, q, chat=None, limit=50):
+        q = (q or '').strip()
+        if not q:
+            raise TGError('empty', '缺少搜索关键词')
+        limit = max(1, min(int(limit), 100))
+        key = (q.lower(), chat or '', limit)
+        hit = self._live.get(key)
+        if hit and time.time() - hit[0] < TTL:       # Telegram limits global search hard: repeats are answered from memory
+            return hit[1]
+        c = self.db()
+        try:
+            ref = self._ref(c, chat) if chat else None
+            got = self._call(self.adapter.search, ref, q, limit)
+            names = {r[0]: r[1] for r in c.execute('select chat, name from tg_dialogs')}
+        finally:
+            c.close()
+        out = []
+        for m in got:
+            cid = chat or m['chat']
+            text = m['text']
+            if m['media']:
+                ph = {'img': '[图片]', 'vid': '[视频]', 'voice': '[语音]', 'file': '[文件] ' + m['name']}[m['media']]
+                text = (text + ' ' + ph).strip() if text else ph
+            out.append({'source': 'telegram', 'live': True, 'chat': cid, 'chat_name': names.get(cid, cid),
+                        'message_id': m['id'], 'ts': m['ts'], 'sender': m['sender'], 'text': text})
+        out.sort(key=lambda r: -r['ts'])
+        self._live[key] = (time.time(), out)
+        if len(self._live) > 50:
+            self._live.pop(next(iter(self._live)))
+        return out
+
+    # -- contacts
+    def contacts(self, force=False):
+        """Cache the Telegram address book (10 minutes). Names and @usernames only, never phone numbers."""
+        c = self.db()
+        try:
+            have = c.execute("select 1 from contacts where source='telegram' limit 1").fetchone()
+            if not force and have and time.time() - float(self._kv(c, 'tg:contacts_at', 0)) < 600:
+                return
+            rows = self._call(self.adapter.contacts)
+            c.execute("delete from contacts where source='telegram'")
+            c.executemany("insert or replace into contacts(source,id,name,remark,nickname,alias,username,kind) "
+                          "values('telegram',?,?,NULL,?,NULL,?,'person')", [(r[0], r[1], r[1], r[2]) for r in rows])
+            c.execute('insert or replace into kv values(?,?)', ('tg:contacts_at', str(time.time())))
+            c.commit()
+        finally:
+            c.close()
 
     # -- messages
     def _store(self, c, chat, got):
