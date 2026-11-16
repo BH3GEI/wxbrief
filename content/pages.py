@@ -192,28 +192,29 @@ def _tg_refresh_bg():
     threading.Thread(target=go, daemon=True).start()
 
 def bots_fold():
-    """The bot pool as one folded row at the top of the Telegram tab (display only)."""
-    bots = ctx.BOTS.list() if ctx.BOTS else []
-    if not bots:
+    """The agent topics as one folded row at the top of the Telegram tab (display only)."""
+    topics = ctx.BOTS.list() if ctx.BOTS else []
+    if not topics:
         return ''
     c = db()
-    rows, latest = [], (0, '')
+    open_rows, closed_rows, latest = [], [], (0, '')
     try:
-        for b in bots:
-            m = c.execute('select ts, sender, text from msgs where chat=? order by ts desc, id desc limit 1', (b['chat'],)).fetchone()
-            last_in = c.execute("select coalesce(max(id),0) from msgs where chat=? and sender != '我'", (b['chat'],)).fetchone()[0]
+        for t in topics:
+            m = c.execute('select ts, text from msgs where chat=? order by ts desc, id desc limit 1', (t['chat'],)).fetchone()
+            last_in = c.execute("select coalesce(max(id),0) from msgs where chat=? and sender != '我'", (t['chat'],)).fetchone()[0]
             if m and m['ts'] > latest[0]:
-                latest = (m['ts'], f"{b['name']}：{(m['text'] or '')[:30]}")
-            state = (f"使用中 · {html.escape(b['holder'] or '')} · 最后活动 {fmt(b['last_activity'])}" if b['status'] == 'busy' else '空闲')
-            rows.append(f'<a class="row" href="/chat?c={urllib.parse.quote(b["chat"])}" data-chat="{html.escape(b["chat"])}" data-last="{last_in}">'
-                        f'<div>{html.escape(b["name"])}</div><div class="sub">{state}' +
-                        (f' · {html.escape((m["text"] or "")[:40])}' if m else '') + '</div></a>')
+                latest = (m['ts'], f"{t['name']}：{(m['text'] or '')[:30]}")
+            row = (f'<a class="row" href="/chat?c={urllib.parse.quote(t["chat"])}" data-chat="{html.escape(t["chat"])}" data-last="{last_in}">'
+                   f'<div>{html.escape(t["name"])}</div><div class="sub">{fmt(t["last_activity"])}' +
+                   (f' · {html.escape((m["text"] or "")[:40])}' if m else '') + '</div></a>')
+            (closed_rows if t['status'] == 'closed' else open_rows).append(row)
     finally:
         c.close()
-    busy = sum(1 for b in bots if b['status'] == 'busy')
-    return (f'<div class="fold" id="botfold"><div><span class="arrow">▶</span>exterior <span class="sub">{len(bots)} 个 bot · {busy} 个在用</span>'
+    closed = (f'<div class="fold sub" id="closedfold"><div><span class="arrow">▶</span>已结束 {len(closed_rows)} 个</div></div>'
+              f'<div id="closedlist" hidden>{"".join(closed_rows)}</div>') if closed_rows else ''
+    return (f'<div class="fold" id="botfold"><div><span class="arrow">▶</span>exterior <span class="sub">{len(open_rows)} 个进行中</span>'
             f'<span class="badge" id="botnew" hidden></span><div class="sub">{html.escape(latest[1]) if latest[0] else "还没有消息"}</div></div>'
-            f'<span class="sub">{fmt(latest[0]) if latest[0] else ""}</span></div><div id="botlist" hidden>{"".join(rows)}</div>' + FOLD_JS)
+            f'<span class="sub">{fmt(latest[0]) if latest[0] else ""}</span></div><div id="botlist" hidden>{"".join(open_rows)}{closed}</div>' + FOLD_JS)
 
 def tg_home(q):
     s = q.get('q', [''])[0].lower()
@@ -273,10 +274,9 @@ def chat(q):
     here = '/chat?c=' + urllib.parse.quote(cid)
     out = [f'<div class="top"><a class="sub" href="{back}">← 返回</a><span>{auto_toggle()} {refresh_btn(here)}</span></div><h3>{html.escape(name)}</h3>']
     if isbot and ctx.BOTS:
-        b = ctx.BOTS.get(cid) or {}
-        out.append('<p class="sub">' + (f"{html.escape(b.get('holder_name') or '')} 在用 · 用途：{html.escape(b.get('purpose') or '')} · "
-                                        f"最后活动 {fmt(b.get('last_activity'))}" if b.get('holder') else '空闲，还没有 agent 在用') +
-                   f" · @{html.escape(cid[len(tgbot.PREFIX):])}</p>")
+        t = ctx.BOTS.get(cid) or {}
+        out.append(f"<p class=\"sub\">{html.escape(t.get('holder_name') or '')} 开的话题 · 用途：{html.escape(t.get('purpose') or '')} · "
+                   f"{'已结束' if t.get('closed') else '进行中'} · 最后活动 {fmt(t.get('last_activity'))}</p>")
     out.append(drafts_html(draft_list(chat=cid)))
     params = {'chat': [cid], 'limit': ['300']}
     around = q.get('around', [''])[0]
@@ -501,23 +501,20 @@ def bots_settings():
         return ''
     e = html.escape
     sm = ctx.BOTS.summary()
-    out = ['<div class="sec" id="bots"><h3>和 agent 对话的 bot</h3>',
-           f'<p>已建 <b>{sm["total"]}</b> / 上限 {sm["size"]} · {sm["busy"]} 个在用</p>',
-           '<p class="sub">agent 领一个 bot，通过它在 Telegram 上和你对话，消息会推到你手机上。bot 只认你一个人，'
-           '闲置超时后自动回收。bot 用你的 Telegram 账号经 BotFather 创建；应用不会删除或修改任何 bot 的 token。</p>']
-    if sm['note']:
+    out = ['<div class="sec" id="bots"><h3>和 agent 对话</h3>',
+           '<p class="sub">一个 bot 加一个只有你和它的群：agent 每个任务开一个话题，在里面和你对话，消息推到你手机上。'
+           '只认你一个人；话题闲置后自动关闭，不会删除任何东西。bot 和群都用你的 Telegram 账号建立。</p>']
+    if sm['ready']:
+        out.append(f'<p>已建好 · bot @{e(sm["bot"])} · {sm["open"]} 个话题进行中，{sm["closed"]} 个已结束</p>')
+    else:
+        if sm['setup']:
+            out.append('<p>正在建立…</p>' + RELOAD3_JS)
+        else:
+            what = '建一个群（bot 已经有了：@' + e(sm['bot']) + '）' if sm['bot'] else '建一个 bot 和一个群'
+            out.append(f'<form class="two" method="post" action="/bots/setup"><button class="pri" data-ask="再点一次：用你的 Telegram 账号{what}">建立</button></form>')
+    if sm['note'] and not (sm['ready'] and sm['note'] == '已建好'):
         out.append(f'<p class="sub">进度：{e(sm["note"])}</p>')
-    if sm['fill']:
-        out.append('<form method="post" action="/bots/fill"><input type="hidden" name="on" value="0"><button>暂停自动建 bot</button></form>')
-    elif sm['total'] < sm['size']:
-        out.append(f'<form class="two" method="post" action="/bots/fill"><input type="hidden" name="on" value="1">'
-                   f'<button class="pri" data-ask="再点一次：用你的 Telegram 账号建 {sm["size"] - sm["total"]} 个 bot">开始建立 bot 池</button></form>')
-    for b in ctx.BOTS.list():
-        state = f'{e(b["holder"] or "")} 在用 · 最后活动 {fmt(b["last_activity"])}' if b['status'] == 'busy' else '空闲'
-        out.append(f'<div class="row"><a href="/chat?c={urllib.parse.quote(b["chat"])}">{e(b["name"])}</a>'
-                   f'<div class="sub">@{e(b["username"])} · {state}</div></div>')
     out.append('<form method="post" action="/bots/config" style="margin-top:12px">'
-               f'<label class="sub">上限（个，最多 {tgbot.MAX_SIZE}；Telegram 普通账号最多能有 20 个 bot，Premium 40 个，包括你在别处建的）</label><input name="size" inputmode="numeric" value="{sm["size"]}">'
-               f'<label class="sub">闲置多久自动回收（小时）</label><input name="idle_hours" inputmode="numeric" value="{sm["idle_hours"]}">'
+               f'<label class="sub">话题闲置多久自动关闭（小时）</label><input name="idle_hours" inputmode="numeric" value="{sm["idle_hours"]}">'
                '<button>保存</button></form></div>')
     return ''.join(out)

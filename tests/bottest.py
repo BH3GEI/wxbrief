@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The bot pool, end to end through the HTTP server: fake Telegram account, fake Bot API, fake BotFather."""
-import asyncio, json, os, re, shutil, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+"""Talking to agents through one bot and a forum group, end to end through the HTTP server.
+Fake Telegram account, fake Bot API, scripted BotFather dialogue."""
+import json, os, re, shutil, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(dir=os.path.join(HERE, '..'))
@@ -17,27 +18,41 @@ def check(name, cond, extra=''):
     print(('PASS ' if cond else 'FAIL ') + name + (f'  [{extra}]' if not cond and extra else ''))
     ok = ok and bool(cond)
 
+GROUP = -1005550001
 
 class BotAPI:
-    """Fake Bot API: per-token update queues, sent messages, display names."""
+    """Fake Bot API: update queue, sent messages, topics."""
     def __init__(self):
-        self.updates, self.sent, self.names, self.uid = {}, [], {}, 0
-    def push(self, token, from_id, text, chat_type='private', mid=None):
+        self.updates, self.sent, self.calls, self.uid, self.next_topic, self.topics = [], [], [], 0, 100, {}
+    def push(self, from_id, text, chat_id=GROUP, thread=None, topic=True, **extra):
         self.uid += 1
-        self.updates.setdefault(token, []).append({'update_id': self.uid, 'message': {
-            'message_id': mid or 1000 + self.uid, 'date': int(time.time()), 'text': text,
-            'from': {'id': from_id}, 'chat': {'id': from_id, 'type': chat_type}}})
+        m = {'message_id': 1000 + self.uid, 'date': int(time.time()), 'from': {'id': from_id},
+             'chat': {'id': chat_id, 'type': 'supergroup' if chat_id == GROUP else 'private'}, **extra}
+        if text is not None:
+            m['text'] = text
+        if thread:
+            m['message_thread_id'] = thread
+            if topic:
+                m['is_topic_message'] = True
+        self.updates.append({'update_id': self.uid, 'message': m})
     def call(self, token, method, params=None, proxy='', timeout=30):
         p = params or {}
+        self.calls.append((method, p))
         if method == 'getUpdates':
-            return [u for u in self.updates.get(token, []) if u['update_id'] >= p.get('offset', 0)]
+            return [u for u in self.updates if u['update_id'] >= p.get('offset', 0)]
         if method == 'sendMessage':
-            self.sent.append((token, p['chat_id'], p['text']))
+            self.sent.append((p['chat_id'], p.get('message_thread_id'), p['text']))
             return {'message_id': 500 + len(self.sent), 'date': int(time.time())}
+        if method == 'createForumTopic':
+            self.next_topic += 1; self.topics[self.next_topic] = {'name': p['name'], 'closed': False}
+            return {'message_thread_id': self.next_topic, 'name': p['name']}
+        if method == 'editForumTopic':
+            self.topics[p['message_thread_id']]['name'] = p['name']; return True
+        if method in ('closeForumTopic', 'reopenForumTopic'):
+            self.topics[p['message_thread_id']]['closed'] = method == 'closeForumTopic'; return True
         if method == 'setMyName':
-            self.names[token] = p['name']; return True
+            return True
         raise AssertionError(method)
-
 
 class K:
     state = 'ok'; capture_note = ''
@@ -50,6 +65,10 @@ try:
     fake = Fake(); ctx.TGS = tg.Service(TMP, ctx.db, ctx.log, adapter=fake)
     ctx.TGS.set_config(api_id='1', api_hash='h'); open(TMP + '/tg.session', 'w').write('s')
     api = BotAPI()
+    # an old (0.9.x) pool file with one bot: it must be reused, not recreated
+    json.dump({'config': {'size': 5, 'idle_hours': 72, 'fill': False, 'note': '', 'probe': {'done': True}},
+               'bots': {'exterior_0a0a_bot': {'token': '7000000001:' + 'X' * 35, 'bot_id': 7000000001, 'owner': fake.owner, 'index': 1}}},
+              open(TMP + '/tg_bots.json', 'w'))
     ctx.BOTS = tgbot.Bots(TMP, ctx.db, ctx.log, ctx.TGS, key_name=lambda kid: (ctx.APIKEYS.get(kid) or {}).get('name'),
                           call=api.call, now=lambda: clock[0], autolisten=False)
     A = ctx.APIKEYS.create('Claude Code'); B = ctx.APIKEYS.create('pi')
@@ -76,180 +95,153 @@ try:
         class NR(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *a, **k): return None
         try:
-            r = urllib.request.build_opener(NR).open(urllib.request.Request(base + path, data=urllib.parse.urlencode(kv).encode(), method='POST'))
-            return r.status
+            return urllib.request.build_opener(NR).open(urllib.request.Request(base + path, data=urllib.parse.urlencode(kv).encode(), method='POST')).status
         except urllib.error.HTTPError as e:
             return e.code
 
-    tokens = lambda: [b['token'] for b in json.load(open(TMP + '/tg_bots.json'))['bots'].values()]
-    by_user = lambda: json.load(open(TMP + '/tg_bots.json'))['bots']
+    state = lambda: ctx.BOTS._load()
+    token = state()['bot']['token']
+    q = urllib.parse.quote
 
-    # ---------------- the pool only starts when the user turns it on (settings page)
-    check('the pool is off until the user turns it on', ctx.BOTS.fill_step() == 600 and by_user() == {} if os.path.exists(TMP + '/tg_bots.json') else ctx.BOTS.fill_step() == 600 and not fake.created)
+    # ---------------- setup only when the user asks, reusing the bot that already exists
+    check('the old pool file is read: its bot is kept', state()['bot']['username'] == 'exterior_0a0a_bot' and 'bots' not in state())
     code, e = call('/api/bots', 'POST', {'purpose': '日报'})
-    check('an empty pool says so (pool_empty), not "all busy"', code == 409 and e['error'] == 'pool_empty')
-    check('the API cannot change the pool settings', call('/api/bots/config', 'POST', {'size': 20})[0] == 404)
-    check('turning it on is a settings-page form', form('/bots/fill', on='1') == 303 and ctx.BOTS.config()['fill'] is True)
-    waits = [ctx.BOTS.fill_step() for _ in range(7)]
-    bots = by_user()
-    check('the pool fills up to the limit (5) and then stops', len(bots) == 5 and fake.created == 5 and waits[-1] == 600, str(waits))
-    check('default names exterior 1..5, usernames exterior_…_bot', sorted(b['default_name'] for b in bots.values()) == [f'exterior {i}' for i in range(1, 6)]
-          and all(re.fullmatch(r'exterior_[0-9a-f]{4}_bot', u) for u in bots))
-    check('each new bot got /start from the owner account', sorted(fake.started) == sorted(bots))
-    check('tokens are kept in a 0600 file', oct(os.stat(TMP + '/tg_bots.json').st_mode & 0o777) == '0o600')
-    check('owner id comes from the account', all(b['owner'] == fake.owner for b in bots.values()))
-    check('BotFather was only ever asked to create bots', all(c[0] == 'create_bot' for c in fake.calls if isinstance(c, tuple) and c[0].startswith('create')))
+    check('before setup: 409 not_ready, says to set it up', code == 409 and e['error'] == 'not_ready')
+    check('nothing happens until the user clicks', ctx.BOTS.setup_step() == 600 and not fake.groups and fake.created == 0)
+    check('the API cannot start the setup', call('/api/bots/setup', 'POST', {})[0] == 404)
+    check('the setup is a settings-page form', form('/bots/setup') == 303 and ctx.BOTS.config()['setup'] is True)
+    ctx.BOTS.setup_step()
+    check('setup reuses the existing bot (no new bot through BotFather)', fake.created == 0 and state()['bot']['username'] == 'exterior_0a0a_bot')
+    check('setup makes one group with the bot in it', fake.groups == [('exterior', 'exterior_0a0a_bot')] and state()['group']['id'] == GROUP)
+    check('setup finishes and says so', ctx.BOTS.ready() and ctx.BOTS.config()['setup'] is False and ctx.BOTS.note == '已建好')
+    check('the bot file is 0600', oct(os.stat(TMP + '/tg_bots.json').st_mode & 0o777) == '0o600')
 
-    # BotFather pacing and the Telegram-wide limit
-    ctx.BOTS.set_config(size=7)
-    fake.botfather_error = tg.TGError('botfather', 'BotFather 没有接受新建：Sorry, too many attempts. Please try again in 8 seconds.')
-    w = ctx.BOTS.fill_step()
-    check('BotFather asking to wait is respected', w == 13 and '8 秒' in ctx.BOTS.fill_note, str((w, ctx.BOTS.fill_note)))
-    fake.botfather_error = tg.TGError('botfather', 'BotFather 没有接受新建：That I cannot do. You come to me asking for more than 20 bots.')
-    ctx.BOTS.fill_step()
-    check('the Telegram-wide limit switches the pool off and says so', ctx.BOTS.config()['fill'] is False and '已到上限' in ctx.BOTS.fill_note)
-    ctx.BOTS.fill_step(); ctx.BOTS.fill_step()
-    check('the reason stays visible after the pool stopped', '已到上限' in ctx.BOTS.fill_note and '已到上限' in call('/api/status')[1]['bots']['note'])
-    again = tgbot.Bots(TMP, ctx.db, ctx.log, ctx.TGS, key_name=lambda k: None, call=api.call, autolisten=False)
-    check('the reason survives a restart', '已到上限' in again.summary()['note'])
-    ctx.BOTS.set_config(fill=True); check('turning it on again clears the old reason', ctx.BOTS.fill_note == '')
-    ctx.BOTS.set_config(fill=False); check('pausing it says paused', ctx.BOTS.fill_note == '已暂停')
-    ctx.BOTS.set_config(size=50)
-    try: ctx.BOTS.set_config(size=51); check('the limit can go up to 50, not beyond', False)
-    except tg.TGError as e: check('the limit can go up to 50 (Premium accounts), not beyond', e.code == 'bad_config' and ctx.BOTS.config()['size'] == 50)
-    ctx.BOTS.set_config(size=5)
+    # a fresh account without a bot: one is made through BotFather; the Telegram limit is explained
+    T2 = tempfile.mkdtemp(dir=TMP); f2 = Fake(); f2.groups = []; s2 = tg.Service(T2, ctx.db, ctx.log, adapter=f2)
+    s2.set_config(api_id='1', api_hash='h'); open(T2 + '/tg.session', 'w').write('s')
+    b2 = tgbot.Bots(T2, ctx.db, ctx.log, s2, key_name=lambda k: None, call=api.call, autolisten=False)
+    b2.set_config(setup=True); b2.setup_step()
+    check('without a bot, setup makes exactly one through BotFather', f2.created == 1 and b2.ready() and re.fullmatch(r'exterior_[0-9a-f]{4}_bot', b2._load()['bot']['username']))
+    T3 = tempfile.mkdtemp(dir=TMP); f3 = Fake(); f3.groups = []; s3 = tg.Service(T3, ctx.db, ctx.log, adapter=f3)
+    s3.set_config(api_id='1', api_hash='h'); open(T3 + '/tg.session', 'w').write('s')
+    f3.botfather_error = tg.TGError('botfather', 'BotFather 没有接受新建：That I cannot do. You come to me asking for more than 20 bots.')
+    b3 = tgbot.Bots(T3, ctx.db, ctx.log, s3, key_name=lambda k: None, call=api.call, autolisten=False)
+    b3.set_config(setup=True); b3.setup_step()
+    check('at the Telegram bot limit: setup stops and explains it', not b3.ready() and b3.config()['setup'] is False and '上限' in b3.note)
+    check('the reason survives a restart', '上限' in tgbot.Bots(T3, ctx.db, ctx.log, s3, key_name=lambda k: None, autolisten=False).summary()['note'])
 
-    # ---------------- claiming
-    code, b1 = call('/api/bots', 'POST', {'purpose': '日报'})
-    check('claim returns a chat, username and link', code == 200 and b1['chat'].startswith('tgbot:exterior_') and b1['link'].startswith('https://t.me/') and b1['mine'])
-    tok1 = by_user()[b1['username']]['token']
-    check('display name becomes "key name · purpose" (on Telegram too)', b1['name'] == 'Claude Code · 日报' and api.names[tok1] == 'Claude Code · 日报')
-    check('a "new task" line is sent to the owner', api.sent[-1] == (tok1, fake.owner, '—— 新任务：Claude Code · 日报 ——'))
+    # ---------------- opening topics
+    code, t1 = call('/api/bots', 'POST', {'purpose': '日报'})
+    tid1 = int(t1['chat'].split(':')[1])
+    check('POST /api/bots opens a topic "key name · purpose" in the group', code == 200 and api.topics[tid1]['name'] == 'Claude Code · 日报' and t1['name'] == 'Claude Code · 日报')
+    check('it returns the chat id, a link and mine=true', t1['chat'] == f'tgbot:{tid1}' and t1['link'] == f'https://t.me/c/5550001/{tid1}' and t1['mine'] and t1['status'] == 'open')
+    n = len(api.topics)
+    code, again = call('/api/bots', 'POST', {'purpose': '日报'})
+    check('same key + same purpose: the same topic, nothing new', again['chat'] == t1['chat'] and len(api.topics) == n)
+    code, t2 = call('/api/bots', 'POST', {'purpose': '盯部署'})
+    check('same key, another purpose: a second topic', t2['chat'] != t1['chat'] and len(api.topics) == n + 1)
+    code, tb = call('/api/bots', 'POST', {'purpose': '日报'}, key=B)
+    check('another key, same purpose: its own topic', tb['chat'] not in (t1['chat'], t2['chat']) and api.topics[int(tb['chat'][6:])]['name'] == 'pi · 日报')
     for bad in ('', '   ', '一' * 21):
         code, e = call('/api/bots', 'POST', {'purpose': bad})
         check(f'purpose must be 1-20 characters ({len(bad)})', code == 400 and e['error'] == 'bad_purpose')
-    code, b2 = call('/api/bots', 'POST', {'purpose': '盯部署'})
-    check('one key may hold several bots', code == 200 and b2['chat'] != b1['chat'])
     code, lst = call('/api/bots')
-    mine = {x['chat'] for x in lst if x['mine']}
-    check('GET /api/bots: status, holder, purpose, mine', mine == {b1['chat'], b2['chat']} and sum(x['status'] == 'busy' for x in lst) == 2
-          and next(x for x in lst if x['chat'] == b1['chat'])['purpose'] == '日报')
-    check('another key sees them as not its own', not any(x['mine'] for x in call('/api/bots', key=B)[1]))
+    check('GET /api/bots lists topics with holder, purpose and mine', {x['chat'] for x in lst if x['mine']} == {t1['chat'], t2['chat']}
+          and next(x for x in lst if x['chat'] == tb['chat'])['holder'] == 'pi')
 
-    # ---------------- sending: only the holder, only to the owner
-    code, e = call('/api/send', 'POST', {'chat': b1['chat'], 'text': 'hi'}, key=B)
-    check('a key that does not hold the bot cannot send through it', code == 403 and e['error'] == 'not_holder')
-    free = next(x for x in lst if x['status'] == 'free')
-    code, e = call('/api/send', 'POST', {'chat': free['chat'], 'text': 'hi'})
-    check('nobody can send through a free bot', code == 403 and e['error'] == 'not_holder')
-    code, r = call('/api/send', 'POST', {'chat': b1['chat'], 'text': '日报写好了，要看吗？'})
-    check('the holder sends at once, gets the stored id back', code == 200 and r['status'] == 'sent' and isinstance(r['id'], int))
-    check('the bot only ever writes to its owner', all(chat_id == fake.owner for _, chat_id, _ in api.sent))
-    code, ms = call('/api/messages?chat=' + urllib.parse.quote(b1['chat']))
-    check('the message is in the chat, sender is the bot, source telegram', ms[-1]['text'] == '日报写好了，要看吗？' and ms[-1]['sender'] == 'Claude Code · 日报' and ms[-1]['source'] == 'telegram')
+    # ---------------- sending: only the key that opened the topic
+    code, e = call('/api/send', 'POST', {'chat': t1['chat'], 'text': 'hi'}, key=B)
+    check('another key cannot write in my topic', code == 403 and e['error'] == 'not_holder')
+    code, r = call('/api/send', 'POST', {'chat': t1['chat'], 'text': '日报写好了，要看吗？'})
+    check('the opener sends at once into its topic, gets the stored id', code == 200 and r['status'] == 'sent' and api.sent[-1] == (GROUP, tid1, '日报写好了，要看吗？'))
+    check('the bot only ever writes into the group', all(c == GROUP for c, _, _ in api.sent))
+    code, ms = call('/api/messages?chat=' + q(t1['chat']))
+    check('the message is stored in the topic chat, source telegram', ms[-1]['text'] == '日报写好了，要看吗？' and ms[-1]['source'] == 'telegram' and ms[-1]['sender'] == 'Claude Code · 日报')
 
-    # ---------------- receiving: the owner only
-    api.push(tok1, fake.owner, '要，发我')
-    api.push(tok1, 999, '我是陌生人')
-    api.push(tok1, fake.owner, '/start')
-    api.push(tok1, fake.owner, '群里的消息', chat_type='group')
-    kept = ctx.BOTS.poll_once(b1['username'])
+    # ---------------- receiving: the user only, in known topics only
+    api.push(fake.owner, '要，发我', thread=tid1)
+    api.push(999, '陌生人', thread=tid1)
+    api.push(fake.owner, '私聊里发给 bot', chat_id=fake.owner)
+    api.push(fake.owner, '群里的 General', thread=None)
+    api.push(fake.owner, '我自己建的话题', thread=999)
+    api.push(fake.owner, None, thread=tid1, forum_topic_reopened={})
+    kept = ctx.BOTS.poll_once()
     code, inc = call(f"/api/messages?after_id={r['id']}")
-    check("only the owner's private messages are kept (stranger, /start and groups dropped)", kept == 1 and [m['text'] for m in inc] == ['要，发我'] and inc[0]['sender'] == '我')
-    check('updates are not read twice', ctx.BOTS.poll_once(b1['username']) == 0)
+    check("only the user's messages in known topics are kept", kept == 1 and [m['text'] for m in inc] == ['要，发我'] and inc[0]['sender'] == '我' and inc[0]['chat'] == t1['chat'])
+    check('updates are not read twice', ctx.BOTS.poll_once() == 0)
 
-    # ---------------- waiting for a reply
-    t0 = time.time(); code, got = call(f"/api/wait?chat={urllib.parse.quote(b1['chat'])}&after_id={r['id']}&timeout=5")
-    check('wait returns at once when something is already there', code == 200 and [m['text'] for m in got] == ['要，发我'] and time.time() - t0 < 2)
+    # ---------------- waiting
+    t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={r['id']}&timeout=5")
+    check('wait returns at once when something is there', [m['text'] for m in got] == ['要，发我'] and time.time() - t0 < 2)
     top = got[-1]['id']
-    t0 = time.time(); code, got = call(f"/api/wait?chat={urllib.parse.quote(b1['chat'])}&after_id={top}&timeout=1")
-    check('wait times out with an empty list', code == 200 and got == [] and 0.9 < time.time() - t0 < 4)
+    t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={top}&timeout=1")
+    check('wait times out with []', got == [] and 0.9 < time.time() - t0 < 4)
     def later():
-        time.sleep(1.2); api.push(tok1, fake.owner, '再改一下标题'); ctx.BOTS.poll_once(b1['username'])
+        time.sleep(1.2); api.push(fake.owner, '标题再改一下', thread=tid1); ctx.BOTS.poll_once()
     threading.Thread(target=later).start()
-    t0 = time.time(); code, got = call(f"/api/wait?chat={urllib.parse.quote(b1['chat'])}&after_id={top}&timeout=10")
-    check('wait returns as soon as the owner replies', [m['text'] for m in got] == ['再改一下标题'] and 1 < time.time() - t0 < 5, str((got, time.time() - t0)))
-    ctx.BOTS.touch(b1['chat']); before = by_user()[b1['username']]['last_activity']; clock[0] += 100
-    call(f"/api/wait?chat={urllib.parse.quote(b1['chat'])}&timeout=1")
-    check('waiting on your own bot counts as activity', by_user()[b1['username']]['last_activity'] == int(clock[0]) > before)
+    t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={top}&timeout=10")
+    check('wait returns as soon as the user replies', [m['text'] for m in got] == ['标题再改一下'] and 1 < time.time() - t0 < 5, str(got))
+    before = state()['topics'][str(tid1)]['last_activity']; clock[0] += 100
+    call(f"/api/wait?chat={q(t1['chat'])}&timeout=1")
+    check('waiting on your own topic counts as activity', state()['topics'][str(tid1)]['last_activity'] == int(clock[0]) > before)
 
-    # ---------------- pool exhausted, explicit username
-    for p in ('三', '四', '五'):
-        call('/api/bots', 'POST', {'purpose': p}, key=B)
-    code, e = call('/api/bots', 'POST', {'purpose': '六'})
-    check('when all bots are in use: 409 pool_exhausted listing who uses them', code == 409 and e['error'] == 'pool_exhausted' and 'pi · 三' in e['message'])
-    code, e = call('/api/bots', 'POST', {'purpose': '六', 'username': 'my_special_bot'})
-    check('asking for a specific username at the limit: bot_limit', code == 409 and e['error'] == 'bot_limit')
-
-    # ---------------- release and idle timeout
-    code, e = call('/api/bots/release', 'POST', {'chat': b1['chat']}, key=B)
-    check('only the holder can release', code == 403 and e['error'] == 'not_holder')
-    code, r2 = call('/api/bots/release', 'POST', {'chat': b2['chat']})
-    tok2 = by_user()[b2['username']]['token']
-    check('release frees the bot and resets its name', code == 200 and by_user()[b2['username']]['holder'] is None and api.names[tok2].startswith('exterior '))
+    # ---------------- idle -> closed (never deleted), reopened by the user or the agent
     clock[0] += 71 * 3600; ctx.BOTS.sweep()
-    check('nothing is taken back before 72 hours', sum(1 for b in by_user().values() if b['holder']) == 4)
+    check('nothing is closed before 72 hours', not any(t.get('closed') for t in state()['topics'].values()))
     clock[0] += 2 * 3600; n = ctx.BOTS.sweep()
-    check('after 72 idle hours busy bots go back to the pool', n == 4 and all(not b['holder'] for b in by_user().values()))
-    check('their names are reset on Telegram', api.names[tok1] == by_user()[b1['username']]['default_name'])
-    code, e = call('/api/send', 'POST', {'chat': b1['chat'], 'text': 'x'})
-    check('the old holder can no longer send through it', code == 403 and e['error'] == 'not_holder')
-    api.push(tok1, fake.owner, '我回来了'); ctx.BOTS.poll_once(b1['username'])
-    b = by_user()[b1['username']]
-    check('the owner writing to a freed bot gives it back to its previous holder', b['holder'] == A['id'] and b['name'] == 'Claude Code · 日报' and api.names[tok1] == 'Claude Code · 日报')
-    check('and the old holder can send again', call('/api/send', 'POST', {'chat': b1['chat'], 'text': '好的'})[0] == 200)
-    # a freed bot that someone else took does not go back
-    clock[0] += 73 * 3600; ctx.BOTS.sweep()
+    check('after 72 idle hours topics are closed', n == 3 and all(t['closed'] for t in state()['topics'].values()), str(n))
+    check('closed topics get "✓ " in front of their title', api.topics[tid1]['name'] == '✓ Claude Code · 日报' and api.topics[tid1]['closed'])
+    check('nothing was ever deleted', not any(m.startswith('delete') for m, _ in api.calls))
     code, lst = call('/api/bots')
-    oldest_free = min((by_user()[x['username']]['freed_at'], x['username']) for x in lst)[1]
-    code, nb = call('/api/bots', 'POST', {'purpose': '新任务'}, key=B)
-    check('a new claim takes the bot that has been free the longest', nb['username'] == oldest_free)
-    if nb['username'] == b1['username']:
-        api.push(tok1, fake.owner, '还在吗'); ctx.BOTS.poll_once(b1['username'])
-        check('a bot claimed by someone else does not go back to its previous holder', by_user()[b1['username']]['holder'] == B['id'])
-    # previous holder whose key was revoked
-    ctx.BOTS.sweep(); clock[0] += 73 * 3600; ctx.BOTS.sweep()
-    u3 = call('/api/bots', 'POST', {'purpose': '临时'}, key=B)[1]['username']
-    clock[0] += 73 * 3600; ctx.BOTS.sweep(); ctx.APIKEYS.revoke(B['id'])
-    t3 = by_user()[u3]['token']; api.push(t3, fake.owner, '在吗'); ctx.BOTS.poll_once(u3)
-    check('a freed bot does not go back to a revoked key', by_user()[u3]['holder'] is None)
+    check('GET /api/bots shows them as closed', all(x['status'] == 'closed' for x in lst))
+    api.push(fake.owner, '我回来了', thread=tid1); ctx.BOTS.poll_once()
+    check('the user writing in a closed topic reopens it, title restored', not state()['topics'][str(tid1)]['closed'] and api.topics[tid1]['name'] == 'Claude Code · 日报' and not api.topics[tid1]['closed'])
+    check('and it still belongs to the same key', call('/api/send', 'POST', {'chat': t1['chat'], 'text': '好的'})[0] == 200)
+    tid2 = int(t2['chat'][6:])
+    code, r2 = call('/api/send', 'POST', {'chat': t2['chat'], 'text': '部署完了'})
+    check('the agent writing again reopens its closed topic too', code == 200 and not api.topics[tid2]['closed'] and api.topics[tid2]['name'] == 'Claude Code · 盯部署')
+    clock[0] += 73 * 3600; ctx.BOTS.sweep()
+    code, back = call('/api/bots', 'POST', {'purpose': '日报'})
+    check('asking again for the same purpose reopens the old topic', back['chat'] == t1['chat'] and back['status'] == 'open' and not api.topics[tid1]['closed'])
+    code, rel = call('/api/bots/release', 'POST', {'chat': t1['chat']}, key=B)
+    check('only the opener can close a topic', code == 403 and rel['error'] == 'not_holder')
+    code, rel = call('/api/bots/release', 'POST', {'chat': t1['chat']})
+    check('release closes it now', code == 200 and api.topics[tid1]['closed'] and state()['topics'][str(tid1)]['closed'])
 
     # ---------------- secrets and hidden chats
     c = ctx.db()
     c.executemany('insert into tg_dialogs(chat,name,kind,hash,last_ts,username) values(?,?,?,?,?,?)',
-                  [('tg:u93372553', 'BotFather', 'u', 1, int(time.time()), 'BotFather')] +
-                  [(f"tg:u{b['bot_id']}", b['default_name'], 'u', 1, int(time.time()), u) for u, b in by_user().items()])
-    c.execute("insert into kv values('tg:dialogs_at', ?)", (str(time.time() + 3600),))
-    c.execute("insert into msgs(chat,local_id,ts,type,sender,text,backfill) values('tg:u93372553',1,?,1,'BotFather','Use this token: " + tokens()[0] + "',0)", (int(time.time()),))
+                  [('tg:u93372553', 'BotFather', 'u', 1, int(time.time()), 'BotFather'),
+                   ('tg:u7000000001', 'exterior', 'u', 1, int(time.time()), 'exterior_0a0a_bot'),
+                   ('tg:g5550001', 'exterior', 'g', 1, int(time.time()), None)])
+    c.execute("insert or replace into kv values('tg:dialogs_at', ?)", (str(time.time() + 3600),))
+    c.execute("insert into msgs(chat,local_id,ts,type,sender,text,backfill) values('tg:u93372553',1,?,1,'BotFather',?,0)", (int(time.time()), 'Use this token: ' + token))
     c.commit(); c.close()
     code, chats = call('/api/chats?source=telegram')
     ids = {x['chat'] for x in chats}
     check('agents do not see the BotFather chat', 'tg:u93372553' not in ids)
-    check("agents do not see the account's duplicate chats with the pool bots", not any(f"tg:u{b['bot_id']}" in ids for b in by_user().values()))
-    check('the bot chats are listed under Telegram', {f'tgbot:{u}' for u in by_user()} <= ids)
+    check("agents do not see the account's copies (bot chat, group)", not ({'tg:u7000000001', 'tg:g5550001'} & ids))
+    check('the topics are listed under Telegram', {t1['chat'], t2['chat'], tb['chat']} <= ids)
     check('and not under WeChat', not any(x['chat'].startswith('tgbot:') for x in call('/api/chats?source=wechat')[1]))
     check('reading the BotFather chat is refused', call('/api/messages?chat=tg:u93372553')[0] == 403)
-    check('searching never returns it', call('/api/search?q=token')[1] == [])
-    code, inc = call('/api/messages?after_id=0&limit=2000')
-    check('nor does an incremental pull', not any(m['chat'] == 'tg:u93372553' for m in inc))
     check('sending to BotFather is refused', call('/api/send', 'POST', {'chat': 'tg:u93372553', 'text': '/deletebot'})[0] == 403)
+    check('searching never returns it', call('/api/search?q=token')[1] == [])
     everything = ''.join(call(p, raw=True)[1] for p in ('/api/bots', '/api/status', '/api/chats', '/api/messages?limit=2000', '/api/wait?timeout=1', '/api/help'))
-    check('no bot token ever appears in an API response', not any(t in everything for t in tokens()))
-    check('WeChat messages exclude bot chats', not any(m['chat'].startswith('tgbot:') for m in call('/api/messages?source=wechat&limit=2000')[1]))
+    check('the bot token never appears in an API response', token not in everything)
 
     # ---------------- pages
     h = call('/tg', raw=True)[1]
-    check('Telegram tab: one folded "exterior" row, closed by default', 'id="botfold"' in h and '<div id="botlist" hidden>' in h and h.count('class="fold"') == 1)
-    check('the folded row is not a <details> (would pause auto refresh)', '<details' not in h[h.index('id="botfold"'):h.index('id="botlist"')])
-    check('the page itself still shows the BotFather chat to you', 'BotFather' in h)
-    check("the account's duplicate bot chats are not listed separately", not any(f"/chat?c=tg:u{b['bot_id']}" in h for b in by_user().values()))
-    busy = call('/api/bots', 'POST', {'purpose': '看页面'})[1]
-    h = call('/chat?c=' + urllib.parse.quote(busy['chat']), raw=True)[1]
-    check('bot chat page: who uses it, and it records what you have read', 'wxb_seen_' in h and '用途' in h)
+    check('Telegram tab: one folded "exterior" row, closed by default', 'id="botfold"' in h and '<div id="botlist" hidden>' in h)
+    check('closed topics are folded once more under "已结束"', 'id="closedfold"' in h and '已结束 3 个' in h and '0 个进行中' in h and '<div id="closedlist" hidden>' in h)
+    check('the folded rows are not <details> (would pause auto refresh)', '<details' not in h[h.index('id="botfold"'):h.index('id="closedlist"')])
+    check('your own copies of the bot chat and group are not listed separately', '/chat?c=tg:u7000000001' not in h and '/chat?c=tg:g5550001' not in h)
+    h = call('/chat?c=' + q(t2['chat']), raw=True)[1]
+    check('topic page: who opened it, the purpose, open or closed; records what you read', '开的话题' in h and '盯部署' in h and '已结束' in h and 'wxb_seen_' in h)
     h = call('/settings', raw=True)[1]
-    check('settings: counts, limit and idle timeout', '已建 <b>5</b> / 上限 5' in h and 'name="idle_hours"' in h and 'value="72"' in h)
-    check('settings changes are page-only forms', form('/bots/config', size='6', idle_hours='48') == 303 and ctx.BOTS.config()['size'] == 6 and ctx.BOTS.config()['idle_hours'] == 48)
-    check('the help text explains the bots (Telegram, not WeChat)', '/api/bots' in call('/api/help?for=telegram', key=None, raw=True)[1] and '/api/bots' not in call('/api/help?for=wechat', key=None, raw=True)[1])
+    check('settings: ready, the bot, topic counts, idle timeout', '已建好' in h and '@exterior_0a0a_bot' in h and '进行中' in h and 'name="idle_hours"' in h)
+    check('settings changes are page-only forms', form('/bots/config', idle_hours='48') == 303 and ctx.BOTS.config()['idle_hours'] == 48)
+    check('help text explains topics (Telegram, not WeChat)', '/api/bots' in call('/api/help?for=telegram', key=None, raw=True)[1]
+          and '/api/bots' not in call('/api/help?for=wechat', key=None, raw=True)[1])
 finally:
     shutil.rmtree(TMP, ignore_errors=True)
 
@@ -271,24 +263,26 @@ def dialogue(replies):
     async def client(): return Client(conv)
     live._client = client
     try:
-        return live.create_bot('exterior 1', 'exterior_ab12_bot'), conv.sent
+        return live.create_bot('exterior', 'exterior_ab12_bot'), conv.sent
     except tg.TGError as e:
         return e, conv.sent
-token = '7123456789:' + 'A' * 35
+tok = '7123456789:' + 'A' * 35
 r, sent = dialogue(['Alright, a new bot. How are we going to call it? Please choose a name for your bot.',
                     "Good. Now let's choose a username for your bot. It must end in `bot`.",
-                    f'Done! Congratulations on your new bot. Use this token to access the HTTP API:\n{token}\nKeep your token secure'])
-check('BotFather: /newbot, name, username -> token', r == token and sent == ['/newbot', 'exterior 1', 'exterior_ab12_bot'])
+                    f'Done! Congratulations on your new bot. Use this token to access the HTTP API:\n{tok}\nKeep your token secure'])
+check('BotFather: /newbot, name, username -> token', r == tok and sent == ['/newbot', 'exterior', 'exterior_ab12_bot'])
 r, sent = dialogue(['Alright, a new bot. Please choose a name for your bot.', 'Now choose a username for your bot.',
                     'Sorry, this username is already taken. Please try something different.'])
-check('BotFather: a refused username cancels the dialogue', isinstance(r, tg.TGError) and sent == ['/newbot', 'exterior 1', 'exterior_ab12_bot', '/cancel'])
+check('BotFather: a refused username cancels the dialogue', isinstance(r, tg.TGError) and sent == ['/newbot', 'exterior', 'exterior_ab12_bot', '/cancel'])
 r, sent = dialogue(['That I cannot do. You come to me asking for more than 20 bots. Please delete one of your old bots first.'])
 check('BotFather: refusing /newbot stops at once, nothing else is sent', isinstance(r, tg.TGError) and sent == ['/newbot'] and '20 bots' in r.msg)
 tgsrc = open(os.path.join(HERE, '..', 'content', 'tg.py')).read(); botsrc = open(os.path.join(HERE, '..', 'content', 'tgbot.py')).read()
-said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('def create_bot'):tgsrc.index('def start_bot')]))
+said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('def create_bot'):tgsrc.index('def create_group')]))
 check('the only fixed texts ever sent to BotFather are /newbot and /cancel', said == {'/newbot', '/cancel'}, str(said))
-methods = set(re.findall(r"self\.call\(b\['token'\], '(\w+)'", botsrc))
-check('the only Bot API methods used are sendMessage, setMyName, getUpdates', methods == {'sendMessage', 'setMyName', 'getUpdates'}, str(methods))
+methods = set(re.findall(r"self\.call\([^,]+, '(\w+)'", botsrc)) | set(re.findall(r"_topic_call\('(\w+)'", botsrc))
+check('Bot API methods used: send, read, rename, create/edit/close/reopen topics; nothing that deletes',
+      methods == {'sendMessage', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
+check('the group is made with manage_topics only', 'ChatAdminRights(manage_topics=True)' in tgsrc)
 
 print('ALL PASS' if ok else 'FAILURES')
 sys.exit(0 if ok else 1)

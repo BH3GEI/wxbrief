@@ -374,6 +374,20 @@ class Live:
                 return m.group(1)
         return self._run(go(), 120, login=True)
 
+    def create_group(self, title, about, bot_username):
+        """A private supergroup with topics, with our bot added as an admin that may only manage topics.
+        Returns the channel id."""
+        async def go():
+            from telethon.tl import functions, types
+            c = await self._client()
+            r = await c(functions.channels.CreateChannelRequest(title=title, about=about, megagroup=True, forum=True))
+            ch = r.chats[0]
+            bot = await c.get_input_entity(bot_username)
+            await c(functions.channels.InviteToChannelRequest(ch, [bot]))
+            await c(functions.channels.EditAdminRequest(ch, bot, types.ChatAdminRights(manage_topics=True), rank='agent'))
+            return ch.id
+        return self._run(go(), 60, login=True)
+
     def start_bot(self, username):
         """/start to our own new bot, so that it may write to us."""
         async def go():
@@ -812,6 +826,9 @@ class Service:
 
     def start_bot(self, username):
         return self._call(self.adapter.start_bot, username)
+
+    def create_group(self, title, about, bot_username):
+        return self._call(self.adapter.create_group, title, about, bot_username)
 
     # -- sending
     def send_direct(self, chat, text):

@@ -56,6 +56,9 @@ class Fake:
         self.taken.add(username)
         return f'{7000 + self.created}:' + 'T' * 34 + str(self.created)
     def start_bot(self, username): self.started.append(username)
+    groups = []
+    def create_group(self, title, about, bot_username):
+        self.groups.append((title, bot_username)); return 5550001
     def contacts(self):
         self.calls.append('contacts')
         return [('tg:u7', '小明', 'xiaoming', 111), ('tg:u50', '没聊过的人', 'nochat', 222)]

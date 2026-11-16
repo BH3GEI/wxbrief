@@ -1,7 +1,7 @@
 # 消息简报 wxbrief
 
 把自己的微信 4.x 聊天记录（只读）和 Telegram 账号（按需读取）整理进本地 SQLite，给 agent 提供统一的 JSON 接口；
-手机浏览器里也能翻看、搜索，并审核 agent 起草的回复。agent 还可以领用一个 Telegram bot，直接和本人对话。
+手机浏览器里也能翻看、搜索，并审核 agent 起草的回复。agent 还可以通过一个 Telegram bot 直接和本人对话。
 
 支持平台：**Windows、macOS、懒猫微服**。微信需为 4.x（使用 SQLCipher 的 xwechat_files 布局）。
 
@@ -11,9 +11,9 @@
   语音（SILK 转 WAV）原件可取；微信里点过“转文字”的语音，转写写进消息文本。
 - **Telegram（用户账号）**：扫码登录，按需读取（没有后台监听，读取不标记已读），媒体懒加载，可现查全部历史。
 - **通讯录**：微信和 Telegram 的联系人，包括没聊过的人。
-- **发送有边界**：微信不发送；Telegram 只有发给自己的收藏夹和 agent 领用的 bot 会直接发出，发给别人一律变成草稿，
+- **发送有边界**：微信不发送；Telegram 只有发给自己的收藏夹和 agent 自己开的话题会直接发出，发给别人一律变成草稿，
   由本人在网页上点两次确认。
-- **bot 池**：agent 领一个 bot，通过它把消息推到本人手机，并等待回复。
+- **和 agent 对话**：agent 在一个只有本人和 bot 的群里开话题，把消息推到本人手机，并等待回复。
 - **网页**：微信 / Telegram 两个标签，会话列表、搜索（命中高亮、定位到原消息）、聊天记录（往上划加载更早的消息）、
   自动刷新、草稿审核、设置、API key 管理。
 - **API key**：可命名、重置、吊销；每个 key 附三份可复制的 agent 说明（微信 / Telegram / 全部）。
@@ -51,20 +51,20 @@ GET  /api/status   GET /api/help
 - 发给 `tg:me`（收藏夹）直接发出；发给其他会话只写入草稿，网页上点两次确认后才发送，每条发送都有记录。
 - @BotFather 的会话对 agent 隐藏（里面有历史 bot token），也不能通过接口给它发消息。
 
-## 和 agent 对话的 bot 池
+## 和 agent 对话：一个 bot，一个话题群
 
-在设置页点“开始建立 bot 池”后，应用用本人的 Telegram 账号经 @BotFather 在后台逐个建好 bot（用户名 `exterior_xxxx_bot`），
-并用本人账号给每个 bot 发一次 `/start`。
+在设置页点“建立”后，应用用本人的 Telegram 账号完成一次性的准备：没有 bot 时经 @BotFather 新建一个（用户名 `exterior_xxxx_bot`），
+再建一个只有本人和这个 bot 的群，打开话题功能，把 bot 设为只能管理话题的管理员。只占用 1 个 bot 名额。
 
-- **领用**：`POST /api/bots {purpose}`，bot 的显示名变成“key 名 · 用途”（用途 1–20 字）。一个 key 可以领多个；
-  只有领用它的 key 能通过它发消息，消息直接推到本人手机。用 `GET /api/wait?chat=tgbot:…&after_id=` 等回复。
-- **只认本人**：bot 只保存本人私聊发来的消息，其他人发的一律丢弃。
-- **回收**：闲置 72 小时（可改）自动回收、显示名复原；回收后本人先回复它，它会回到原来的 key。也可以 `POST /api/bots/release` 主动归还。
-- **数量**：上限默认 5，可改到 50。Telegram 本身限制每个账号最多 20 个 bot（Premium 40 个），包括在别处建的；
-  达到 Telegram 的上限时自动停止建池，并在设置页说明原因。
-- **边界**：只走 BotFather 的 `/newbot` 流程，没有删除、重置 token、转让等能力；token 只存在数据目录的 `tg_bots.json`（0600），
-  接口不返回。上限、闲置时间、开关只能在网页上改。
-- 网页的 Telegram 标签里，这些 bot 收在一行可折叠的“exterior”里，有未读时显示数字。
+- **开话题**：`POST /api/bots {purpose}`，在群里开一个名为“key 名 · 用途”的话题（用途 1–20 字）。同一个 key 用同样的用途再调用，
+  拿回同一个话题。只有开话题的 key 能在里面发消息（`POST /api/send`），消息推到本人手机；用 `GET /api/wait?chat=tgbot:…&after_id=` 等回复。
+- **只认本人**：只保存本人在这些话题里发的消息，其他人或其他地方的消息一律丢弃。
+- **不删除任何东西**：话题闲置 72 小时（可改）自动关闭，标题前加“✓ ”；本人回复或 agent 再发消息时重新打开，仍归原来的 key。
+  也可以 `POST /api/bots/release` 主动关闭。
+- **边界**：BotFather 只走 `/newbot` 流程；Bot API 只用发送、读取、改名和建立/改名/关闭/重开话题，没有任何删除操作。
+  token 只存在数据目录的 `tg_bots.json`（0600），接口不返回。建立和闲置时间只能在网页上操作。
+- 网页的 Telegram 标签里，这些话题收在一行可折叠的“exterior”里，已结束的再收一层，有未读时显示数字。
+  本人账号里对应的 bot 私聊和群不再单独列出，也对 agent 隐藏。
 
 ## 通讯录
 
@@ -95,7 +95,7 @@ Telegram 不读手机号。微信的联系人表保存了见过的所有人，�
 数据在 `~/.wxbrief`，自动找 `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files`。
 
 桌面端默认只监听 127.0.0.1，网页（含 key 管理）只有本机能访问；`/api/` 全部要 key。
-桌面版压缩包不含 Telegram 的依赖，Telegram 和 bot 池目前在懒猫版上使用。
+桌面版压缩包不含 Telegram 的依赖，Telegram 和 bot 目前在懒猫版上使用。
 
 ## 懒猫微服
 
@@ -131,7 +131,7 @@ lzc-cli app install --apk n dist/*.lpk       # 需要盒子上装有“懒猫开
 ## 代码结构
 
 `content/`：`app.py`（HTTP 和启动）、`ctx.py`（路径、日志、数据库、共享服务）、`wechat.py`（读微信）、`api.py`（agent 接口和说明文字）、
-`pages.py`（网页，CSS/JS 在 `web/`）、`tg.py`（Telegram）、`tgbot.py`（bot 池）、`keys.py` / `capturer.py`（微信密钥）、`media.py`（媒体）。
+`pages.py`（网页，CSS/JS 在 `web/`）、`tg.py`（Telegram）、`tgbot.py`（bot 和话题群）、`keys.py` / `capturer.py`（微信密钥）、`media.py`（媒体）。
 
 ## 开发
 
@@ -139,7 +139,7 @@ lzc-cli app install --apk n dist/*.lpk       # 需要盒子上装有“懒猫开
 python3 tests/synthtest.py     # 合成的加密微信库，全链路
 python3 tests/apptest.py       # 接口和网页（模拟 Telegram）
 python3 tests/tgtest.py        # Telegram 的缓存、补全、搜索、发送规则
-python3 tests/bottest.py       # bot 池（模拟账号、Bot API 和 BotFather 对话）
+python3 tests/bottest.py       # bot 和话题群（模拟账号、Bot API 和 BotFather 对话）
 python3 tests/locktest.py      # 慢操作期间不占用数据库写锁
 python3 tests/memscan_test.py  # 进程内存扫描（Windows/Linux 直接可跑）
 ```

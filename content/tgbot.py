@@ -1,16 +1,16 @@
-"""A pool of Telegram bots for talking to agents.
+"""Talking to agents through one Telegram bot and a private forum group.
 
-- The pool is created in the background through @BotFather from the user account (tg.Service.botfather_create:
-  a fixed /newbot dialogue; nothing that edits, revokes or deletes bots exists in this code). It only starts after
-  the user turns it on in the settings page; the size and the idle timeout are set there too, never by the API.
-- An agent claims a bot for one task (POST /api/bots): the bot's display name becomes "<key name> · <purpose>".
-  One key may hold several bots. Only the holding key can send through a bot.
-- A bot that has been idle for `idle_hours` goes back to the pool (display name reset). If the owner writes to it
-  before someone else claims it, it goes back to its previous holder.
-- Each bot talks to its owner only: messages from anyone else are dropped. Tokens stay in VAR/tg_bots.json (0600)
-  and are never returned by the API.
+- Setup (settings page only): the app makes one bot through @BotFather if there is none (fixed /newbot dialogue;
+  nothing that edits, revokes or deletes bots exists in this code), then, from the user account, creates a private
+  supergroup with topics, adds the bot and makes it an admin that may manage topics. Only the user and the bot are in it.
+- An agent opens a topic for one task (POST /api/bots {purpose}): the topic is called "<key name> · <purpose>".
+  The same key with the same purpose gets the same topic back. Only the key that opened a topic can write in it.
+- A topic idle for `idle_hours` is closed and its title gets a "✓ " prefix. Nothing is ever deleted. When the user
+  writes in it (or its agent writes again) it is reopened and keeps belonging to the same key.
+- The bot keeps only the user's messages in the group's topics; everything else is dropped. The token stays in
+  VAR/tg_bots.json (0600) and is never returned by the API.
 
-Chats are stored as `tgbot:<username>` in the same `msgs` table.
+Topics are stored as chats `tgbot:<topic id>` in the same `msgs` table.
 """
 import http.client, json, os, re, secrets, socket, ssl, threading, time
 
@@ -18,9 +18,11 @@ from tg import TGError
 
 PREFIX = 'tgbot:'
 API_HOST = 'api.telegram.org'
-DEFAULT_CONFIG = {'size': 5, 'idle_hours': 72, 'fill': False}
-MAX_SIZE = 50      # Telegram allows 20 bots per account, 40 with Premium; leave room for later changes
+DEFAULT_CONFIG = {'idle_hours': 72, 'setup': False, 'note': ''}
 PURPOSE_MAX = 20
+CLOSED = '✓ '
+GROUP_TITLE = 'exterior'
+BOT_NAME = 'exterior'
 
 
 def is_bot(chat):
@@ -61,22 +63,29 @@ def bot_call(token, method, params=None, proxy='', timeout=30):
 
 class Bots:
     def __init__(self, var, db, log, tgs, key_name, proxy=lambda: '', call=bot_call, now=time.time, autolisten=True):
-        """tgs: tg.Service (creates bots through BotFather). key_name(key_id) -> name, or None if the key is gone.
-        autolisten=False (tests): no background listener per bot; call poll_once yourself."""
+        """tgs: tg.Service. key_name(key_id) -> name, or None if the key is gone.
+        autolisten=False (tests): no background listener; call poll_once yourself."""
         self.path = var + '/tg_bots.json'
         self.db, self.log, self.tgs, self.key_name, self.proxy, self.call, self.now = db, log, tgs, key_name, proxy, call, now
         self.lock = threading.RLock()
-        self.listeners = {}
+        self.listener = None
         self.wake = threading.Event()
         self.autolisten = autolisten
 
-    # ------------------------------------------------------------------ storage (tokens never leave this file)
+    # ------------------------------------------------------------------ storage (the token never leaves this file)
     def _load(self):
         try:
             d = json.load(open(self.path))
         except Exception:
             d = {}
-        d.setdefault('config', {}); d.setdefault('bots', {})
+        if 'bots' in d:                                   # 0.9.x pool layout: keep its first bot, drop the rest of it
+            if d['bots'] and not d.get('bot'):
+                u, b = min(d['bots'].items(), key=lambda x: x[1].get('index') or 99)
+                d['bot'] = {'username': u, 'token': b['token'], 'bot_id': b['bot_id'], 'owner': b['owner']}
+            d.pop('bots')
+            for k in ('size', 'fill', 'probe'):
+                d.get('config', {}).pop(k, None)
+        d.setdefault('config', {}); d.setdefault('topics', {}); d.setdefault('offset', 0)
         for k, v in DEFAULT_CONFIG.items():
             d['config'].setdefault(k, v)
         return d
@@ -88,65 +97,125 @@ class Bots:
             json.dump(d, f)
         os.replace(tmp, self.path)
 
-    @property
-    def fill_note(self):
-        """Why the pool is (not) growing; kept in the file so a restart does not lose the reason it stopped."""
-        return self._load()['config'].get('note', '')
-
-    @fill_note.setter
-    def fill_note(self, v):
-        with self.lock:
-            d = self._load()
-            if d['config'].get('note', '') != v:
-                d['config']['note'] = v
-                self._save(d)
-
     def config(self):
         return dict(self._load()['config'])
 
-    def set_config(self, size=None, idle_hours=None, fill=None):
-        """Settings page only (the API cannot change the pool)."""
+    @property
+    def note(self):
+        return self._load()['config'].get('note', '')
+
+    @note.setter
+    def note(self, v):
         with self.lock:
             d = self._load()
-            if size is not None:
-                if not 0 <= int(size) <= MAX_SIZE:
-                    raise TGError('bad_config', f'上限要在 0 到 {MAX_SIZE} 之间')
-                d['config']['size'] = int(size)
+            if d['config'].get('note') != v:
+                d['config']['note'] = v
+                self._save(d)
+
+    def set_config(self, idle_hours=None, setup=None):
+        """Settings page only (the API cannot change these)."""
+        with self.lock:
+            d = self._load()
             if idle_hours is not None:
                 if not 1 <= int(idle_hours) <= 24 * 365:
                     raise TGError('bad_config', '闲置超时要在 1 小时到 1 年之间')
                 d['config']['idle_hours'] = int(idle_hours)
-            if fill is not None:
-                d['config']['fill'] = bool(fill)
-                d['config']['note'] = '' if fill else '已暂停'
+            if setup is not None:
+                d['config']['setup'] = bool(setup)
+                if setup:
+                    d['config']['note'] = '正在建立…'
             self._save(d)
         self.wake.set()
 
     # ------------------------------------------------------------------ views
-    def _public(self, u, b, key_id=None):
-        return {'chat': PREFIX + u, 'username': u, 'link': f'https://t.me/{u}', 'name': b['name'],
-                'status': 'busy' if b.get('holder') else 'free', 'holder': b.get('holder_name') if b.get('holder') else None,
-                'purpose': b.get('purpose') if b.get('holder') else None, 'last_activity': b.get('last_activity'),
-                'mine': bool(key_id and b.get('holder') == key_id)}
+    def ready(self):
+        d = self._load()
+        return bool(d.get('bot') and d.get('group'))
+
+    def _public(self, tid, t, key_id=None, d=None):
+        d = d or self._load()
+        g = d.get('group') or {}
+        return {'chat': PREFIX + str(tid), 'name': t['name'], 'status': 'closed' if t.get('closed') else 'open',
+                'holder': t.get('holder_name'), 'purpose': t.get('purpose'), 'last_activity': t.get('last_activity'),
+                'mine': bool(key_id and t.get('holder') == key_id), 'link': f"https://t.me/c/{g.get('channel_id')}/{tid}"}
 
     def list(self, key_id=None):
-        bots = self._load()['bots']
-        return [self._public(u, b, key_id) for u, b in sorted(bots.items(), key=lambda x: (x[1].get('index') or 99, x[1]['created']))]
+        d = self._load()
+        ts = sorted(d['topics'].items(), key=lambda x: (bool(x[1].get('closed')), -(x[1].get('last_activity') or 0)))
+        return [self._public(tid, t, key_id, d) for tid, t in ts]
 
     def summary(self):
         d = self._load()
-        return {'total': len(d['bots']), 'busy': sum(1 for b in d['bots'].values() if b.get('holder')), **d['config'],
-                'note': self.fill_note}
+        return {'ready': bool(d.get('bot') and d.get('group')), 'bot': (d.get('bot') or {}).get('username'),
+                'open': sum(1 for t in d['topics'].values() if not t.get('closed')),
+                'closed': sum(1 for t in d['topics'].values() if t.get('closed')), **d['config']}
 
     def user_side_chats(self):
-        """The user account's own dialogs with the pool bots (duplicates of the tgbot: chats)."""
-        return {f"tg:u{b['bot_id']}" for b in self._load()['bots'].values()}
+        """The user account's own copies of these conversations (the bot's private chat, the group): hidden from agents."""
+        d = self._load()
+        out = set()
+        if d.get('bot'):
+            out.add(f"tg:u{d['bot']['bot_id']}")
+        if d.get('group'):
+            out.add(f"tg:g{d['group']['channel_id']}")
+        return out
 
     def get(self, chat):
-        b = self._load()['bots'].get(chat[len(PREFIX):]) if is_bot(chat) else None
-        return dict(b) if b else None
+        if not is_bot(chat):
+            return None
+        t = self._load()['topics'].get(chat[len(PREFIX):])
+        return dict(t) if t else None
 
-    # ------------------------------------------------------------------ creating
+    # ------------------------------------------------------------------ setup
+    def setup_step(self):
+        """Run the setup once the user asked for it on the settings page. Returns seconds to wait."""
+        c = self.config()
+        if not c['setup']:
+            return 600
+        if self.ready():
+            self.set_config(setup=False); self.note = '已建好'
+            return 600
+        if not self.tgs.configured():
+            self.note = '等待 Telegram 设置和登录'
+            return 60
+        try:
+            d = self._load()
+            if not d.get('bot'):
+                self.note = '正在通过 BotFather 新建 bot…'
+                username = self._new_username()
+                token = self.tgs.botfather_create(BOT_NAME, username)
+                with self.lock:
+                    d = self._load()
+                    d['bot'] = {'username': username, 'token': token, 'bot_id': int(token.split(':')[0]), 'owner': self.tgs.owner_id()}
+                    self._save(d)
+                self.log('bots: created bot', username)
+            b = self._load()['bot']
+            try:
+                self.call(b['token'], 'setMyName', {'name': BOT_NAME}, self.proxy())
+            except TGError as e:
+                self.log('bots: rename bot', e.msg)
+            if not self._load().get('group'):
+                self.note = '正在建对话群…'
+                cid = self.tgs.create_group(GROUP_TITLE, '和 agent 对话的群：每个任务一个话题。', b['username'])
+                with self.lock:
+                    d = self._load()
+                    d['group'] = {'channel_id': cid, 'id': int(f'-100{cid}')}
+                    self._save(d)
+                self.log('bots: created group', cid)
+            self.set_config(setup=False)
+            self.note = '已建好'
+            self.listen()
+            return 600
+        except TGError as e:
+            self.set_config(setup=False)
+            text = e.msg
+            if re.search(r'more than \d+ bots', text):
+                self.note = 'Telegram 账号的 bot 总数已到上限（普通账号 20 个，Premium 40 个）。在 BotFather 里删掉一个不用的 bot 后再点“建立”'
+            else:
+                self.note = '建立失败：' + text[:160]
+            self.log('bots: setup failed', text[:200])
+            return 600
+
     def _new_username(self):
         for _ in range(8):
             u = f'exterior_{secrets.token_hex(2)}_bot'
@@ -154,282 +223,198 @@ class Bots:
                 return u
         raise TGError('botfather', '找不到可用的用户名，请稍后再试')
 
-    def create(self, username=None):
-        """Create one bot through BotFather (counts toward the limit). Returns its username."""
-        with self.lock:
-            d = self._load()
-            if len(d['bots']) >= d['config']['size']:
-                raise TGError('bot_limit', f"bot 数量已到上限（{d['config']['size']}）。请复用已有的 bot，或请用户在设置页调高上限。")
-            used = {b.get('index') for b in d['bots'].values()}
-            index = next(i for i in range(1, 100) if i not in used)
-        if username:
-            username = username.strip().lstrip('@')
-            if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{1,28}[Bb][Oo][Tt]', username) or len(username) < 5:
-                raise TGError('bad_username', '用户名要 5 到 32 个字母、数字或下划线，以字母开头，以 bot 结尾')
-            if not self.tgs.username_free(username):
-                raise TGError('bad_username', f'用户名 {username} 已经被占用')
-        else:
-            username = self._new_username()
-        name = f'exterior {index}'
-        token = self.tgs.botfather_create(name, username)
-        owner = self.tgs.owner_id()
-        with self.lock:
-            d = self._load()
-            d['bots'][username] = {'token': token, 'bot_id': int(token.split(':')[0]), 'owner': owner, 'index': index,
-                                   'default_name': name, 'name': name, 'created': int(self.now()), 'offset': 0,
-                                   'holder': None, 'last': None, 'last_activity': None, 'freed_at': int(self.now())}
-            self._save(d)
-        self._chat_row(username, name)
-        try:
-            self.tgs.start_bot(username)          # lets the bot message its owner
-        except TGError as e:
-            self.log('bots: created', username, 'but /start failed:', e.msg)
-        self.log('bots: created', username)
-        if self.autolisten:
-            self.listen(username)
-        return username
+    # ------------------------------------------------------------------ topics
+    def _need_ready(self):
+        if not self.ready():
+            raise TGError('not_ready', '对话群还没有建好：需要用户在设置页“和 agent 对话的 bot”里点“建立”。')
 
-    def fill_step(self):
-        """Create the next bot if the pool is switched on and below its size. Returns seconds to wait."""
-        c = self.config()
-        if not c['fill']:
-            return 600                      # keep the note: it says why the pool stopped
-        if len(self._load()['bots']) >= c['size']:
-            self.fill_note = ''
-            return 600
-        if not self.tgs.configured():
-            self.fill_note = '等待 Telegram 设置和登录'
-            return 60
-        try:
-            u = self.create()
-            self.fill_note = f'刚建好 {u}'
-            return 30
-        except TGError as e:
-            text = e.msg
-            m = re.search(r'(\d+)\s*seconds?', text)
-            if m:
-                self.fill_note = f'BotFather 要求等待 {m.group(1)} 秒'
-                return int(m.group(1)) + 5
-            if re.search(r'more than \d+ bots|20 bots', text):
-                self.set_config(fill=False)
-                self.fill_note = ('Telegram 账号的 bot 总数已到上限（普通账号 20 个，Premium 40 个），自动建 bot 已停止。'
-                                  '可以在 BotFather 里删掉不用的 bot，再点“开始建立 bot 池”继续')
-                return 600
-            if e.code == 'rate_limited' and e.retry_after:
-                self.fill_note = f'Telegram 限流，{e.retry_after} 秒后继续'
-                return e.retry_after + 5
-            self.fill_note = '建 bot 出错：' + text[:120]
-            return 600
-
-    # ------------------------------------------------------------------ claiming and releasing
-    def claim(self, key, purpose, username=None):
-        """key: the API key record ({id, name}). Returns the bot."""
+    def claim(self, key, purpose):
+        """key: the API key record ({id, name}). Same key + same purpose -> the same topic, reopened if needed."""
         purpose = re.sub(r'\s+', ' ', (purpose or '').strip())
         if not 1 <= len(purpose) <= PURPOSE_MAX:
-            raise TGError('bad_purpose', f'purpose 要写这个 bot 的用途，1 到 {PURPOSE_MAX} 个字，例如“日报”“盯部署”')
-        if username:
-            username = self.create(username)
+            raise TGError('bad_purpose', f'purpose 要写这个话题的用途，1 到 {PURPOSE_MAX} 个字，例如“日报”“盯部署”')
+        self._need_ready()
+        d = self._load()
+        for tid, t in d['topics'].items():
+            if t.get('holder') == key['id'] and t.get('purpose') == purpose:
+                if t.get('closed'):
+                    self._reopen(tid)
+                self.touch(PREFIX + tid)
+                return self._public(tid, self._load()['topics'][tid], key['id'])
+        name = f"{key['name']} · {purpose}"[:120]
+        b, g = d['bot'], d['group']
+        r = self.call(b['token'], 'createForumTopic', {'chat_id': g['id'], 'name': name}, self.proxy())
+        tid = str(r['message_thread_id'])
         with self.lock:
             d = self._load()
-            if username:
-                pick = username
-            else:
-                free = [(b.get('freed_at') or 0, u) for u, b in d['bots'].items() if not b.get('holder')]
-                if not d['bots']:
-                    raise TGError('pool_empty', 'bot 池还没有建好：需要用户在设置页“和 agent 对话的 bot”里开启。')
-                if not free:
-                    busy = [self._public(u, b) for u, b in d['bots'].items()]
-                    raise TGError('pool_exhausted', f'bot 池（{len(busy)} 个）都在使用中。闲置 {d["config"]["idle_hours"]} 小时的会自动回收；'
-                                  f'也可以请用户在设置页调高上限。正在用的：' +
-                                  '；'.join(f'{x["name"]}（最后活动 {time.strftime("%m-%d %H:%M", time.localtime(x["last_activity"] or 0))}）' for x in busy))
-                pick = min(free)[1]
-            b = d['bots'][pick]
-            name = f"{key['name']} · {purpose}"[:64]
-            b.update(holder=key['id'], holder_name=key['name'], purpose=purpose, name=name,
-                     claimed_at=int(self.now()), last_activity=int(self.now()))
+            d['topics'][tid] = {'name': name, 'holder': key['id'], 'holder_name': key['name'], 'purpose': purpose,
+                                'created': int(self.now()), 'last_activity': int(self.now()), 'closed': False}
             self._save(d)
-        self._rename(pick, name)
-        self._say(pick, f'—— 新任务：{name} ——')
-        self.log('bots:', key['name'], 'claimed', pick, 'for', purpose)
-        return self._public(pick, self._load()['bots'][pick], key['id'])
+        self._chat_row(tid, name)
+        self.log('bots:', key['name'], 'opened topic', tid, 'for', purpose)
+        return self._public(tid, self._load()['topics'][tid], key['id'])
 
     def release(self, key, chat):
+        t = self.get(chat)
+        if not t:
+            raise TGError('unknown_chat', '没有这个话题')
+        if t.get('holder') != key['id']:
+            raise TGError('not_holder', '这个话题不是你开的')
+        if not t.get('closed'):
+            self._close(chat[len(PREFIX):])
+        return {'status': 'closed', 'chat': chat}
+
+    def _topic_call(self, method, tid, **extra):
+        d = self._load()
+        try:
+            self.call(d['bot']['token'], method, {'chat_id': d['group']['id'], 'message_thread_id': int(tid), **extra}, self.proxy())
+        except TGError as e:
+            if 'NOT_MODIFIED' not in e.msg.upper():
+                self.log('bots:', method, tid, e.msg)
+
+    def _close(self, tid):
         with self.lock:
             d = self._load()
-            b = d['bots'].get(chat[len(PREFIX):]) if is_bot(chat) else None
-            if not b:
-                raise TGError('unknown_chat', '没有这个 bot')
-            if b.get('holder') != key['id']:
-                raise TGError('not_holder', '这个 bot 不在你手上')
-            self._free(b)
+            t = d['topics'][tid]
+            t['closed'] = True
             self._save(d)
-        self._rename(chat[len(PREFIX):], b['default_name'])
-        return {'status': 'released', 'chat': chat}
+        self._topic_call('editForumTopic', tid, name=(CLOSED + t['name'])[:128])
+        self._topic_call('closeForumTopic', tid)
+        self._chat_row(tid, CLOSED + t['name'])
 
-    def _free(self, b):
-        b['last'] = {'holder': b['holder'], 'holder_name': b.get('holder_name'), 'purpose': b.get('purpose'), 'name': b['name']}
-        b.update(holder=None, holder_name=None, purpose=None, name=b['default_name'], freed_at=int(self.now()))
+    def _reopen(self, tid):
+        with self.lock:
+            d = self._load()
+            t = d['topics'][tid]
+            t['closed'] = False
+            t['last_activity'] = int(self.now())
+            self._save(d)
+        self._topic_call('reopenForumTopic', tid)
+        self._topic_call('editForumTopic', tid, name=t['name'])
+        self._chat_row(tid, t['name'])
 
     def sweep(self):
-        """Release bots that have been idle for longer than the configured timeout."""
-        freed = []
-        with self.lock:
-            d = self._load()
-            limit = self.now() - d['config']['idle_hours'] * 3600
-            for u, b in d['bots'].items():
-                if b.get('holder') and (b.get('last_activity') or 0) < limit:
-                    self._free(b)
-                    freed.append((u, b['default_name']))
-            if freed:
-                self._save(d)
-        for u, name in freed:
-            self._rename(u, name)
-            self.log('bots: idle, back to the pool:', u)
-        return len(freed)
+        """Close topics that have been idle for longer than the configured timeout."""
+        d = self._load()
+        limit = self.now() - d['config']['idle_hours'] * 3600
+        idle = [tid for tid, t in d['topics'].items() if not t.get('closed') and (t.get('last_activity') or 0) < limit]
+        for tid in idle:
+            self._close(tid)
+            self.log('bots: topic idle, closed:', tid)
+        return len(idle)
 
     def touch(self, chat):
         with self.lock:
             d = self._load()
-            b = d['bots'].get(chat[len(PREFIX):])
-            if b and b.get('holder'):
-                b['last_activity'] = int(self.now())
+            t = d['topics'].get(chat[len(PREFIX):])
+            if t:
+                t['last_activity'] = int(self.now())
                 self._save(d)
 
     # ------------------------------------------------------------------ talking
     def send(self, key, chat, text):
-        b = self.get(chat)
-        if not b:
-            raise TGError('unknown_chat', '没有这个 bot。先 GET /api/bots 看有哪些。')
-        if b.get('holder') != key['id']:
-            raise TGError('not_holder', '这个 bot 不在你手上：先用 POST /api/bots 领取一个，或用你已经领到的那个。')
+        t = self.get(chat)
+        if not t:
+            raise TGError('unknown_chat', '没有这个话题。先 GET /api/bots 看有哪些，或用 POST /api/bots 开一个。')
+        if t.get('holder') != key['id']:
+            raise TGError('not_holder', '这个话题不是你开的：用 POST /api/bots 开你自己的话题。')
         text = (text or '').strip()
         if not text:
             raise TGError('empty', '内容是空的')
         if len(text) > 4096:
             raise TGError('too_long', 'Telegram 单条消息最多 4096 字')
-        mid = self._say(chat[len(PREFIX):], text, raise_errors=True)
+        tid = chat[len(PREFIX):]
+        if t.get('closed'):
+            self._reopen(tid)
+        d = self._load()
+        m = self.call(d['bot']['token'], 'sendMessage', {'chat_id': d['group']['id'], 'message_thread_id': int(tid), 'text': text},
+                      self.proxy())
+        mid = self._store(tid, m['message_id'], m.get('date') or int(self.now()), t['name'], text)
         self.touch(chat)
         return {'status': 'sent', 'chat': chat, 'id': mid}
 
-    def _say(self, username, text, raise_errors=False):
-        """The bot writes to its owner. Returns the stored row id."""
-        b = self._load()['bots'][username]
-        try:
-            m = self.call(b['token'], 'sendMessage', {'chat_id': b['owner'], 'text': text}, self.proxy())
-        except TGError as e:
-            if raise_errors:
-                raise
-            self.log('bots:', username, 'send failed:', e.msg)
-            return None
-        return self._store(username, m['message_id'], m.get('date') or int(self.now()), b['name'], text)
-
-    def _rename(self, username, name):
-        b = self._load()['bots'].get(username)
-        if b:
-            try:
-                self.call(b['token'], 'setMyName', {'name': name}, self.proxy())
-            except TGError as e:
-                self.log('bots:', username, 'rename failed:', e.msg)
-        self._chat_row(username, name)
-
-    def _chat_row(self, username, name):
+    def _chat_row(self, tid, name):
         c = self.db()
         try:
             c.execute('insert into chats(chat, name, last_local) values(?,?,0) on conflict(chat) do update set name=excluded.name',
-                      (PREFIX + username, name))
+                      (PREFIX + str(tid), name))
             c.commit()
         finally:
             c.close()
 
-    def _store(self, username, local_id, ts, sender, text):
+    def _store(self, tid, local_id, ts, sender, text):
         c = self.db()
         try:
             cur = c.execute('insert or ignore into msgs(chat, local_id, ts, type, sender, text, backfill) values(?,?,?,1,?,?,0)',
-                            (PREFIX + username, local_id, ts, sender, text))
-            c.execute('update chats set last_local=max(last_local, ?) where chat=?', (local_id, PREFIX + username))
+                            (PREFIX + str(tid), local_id, ts, sender, text))
+            c.execute('update chats set last_local=max(last_local, ?) where chat=?', (local_id, PREFIX + str(tid)))
             c.commit()
             return cur.lastrowid
         finally:
             c.close()
 
-    def poll_once(self, username, timeout=50):
-        """One getUpdates round: keep the owner's messages, drop everyone else's. Returns how many were kept."""
-        b = self._load()['bots'].get(username)
-        if not b:
+    def poll_once(self, timeout=50):
+        """One getUpdates round: keep the user's messages in known topics of the group, drop everything else."""
+        d = self._load()
+        if not d.get('bot'):
             return 0
-        ups = self.call(b['token'], 'getUpdates', {'offset': b['offset'], 'timeout': timeout, 'allowed_updates': ['message']},
+        b, g = d['bot'], d.get('group') or {}
+        ups = self.call(b['token'], 'getUpdates', {'offset': d['offset'], 'timeout': timeout, 'allowed_updates': ['message']},
                         self.proxy(), timeout + 15)
-        kept, offset = 0, b['offset']
+        kept, offset = 0, d['offset']
         for up in ups:
             offset = max(offset, up['update_id'] + 1)
             m = up.get('message') or {}
-            if not m or (m.get('from') or {}).get('id') != b['owner'] or (m.get('chat') or {}).get('type') != 'private':
-                continue                                          # the bot only listens to its owner
+            tid = str(m.get('message_thread_id') or '')
+            if (not m or (m.get('from') or {}).get('id') != b['owner'] or (m.get('chat') or {}).get('id') != g.get('id')
+                    or not m.get('is_topic_message') or tid not in d['topics']):
+                continue                                          # only the user, only in the group's known topics
+            kind = next((k for k in ('photo', 'voice', 'video', 'document', 'sticker') if k in m), None)
             text = m.get('text') or m.get('caption') or ''
-            if not m.get('text'):
-                kind = next((k for k in ('photo', 'voice', 'video', 'document', 'sticker') if k in m), None)
+            if not text and not kind:
+                continue                                          # service messages (topic created / closed ...)
+            if kind and not m.get('text'):
                 text = (text + ' ' if text else '') + {'photo': '[图片]', 'voice': '[语音]', 'video': '[视频]',
-                                                       'document': '[文件]', 'sticker': '[贴纸]'}.get(kind, '[消息]')
-            if text.strip() == '/start':
-                continue
-            self._owner_wrote(username)
-            self._store(username, m['message_id'], m.get('date') or int(self.now()), '我', text)
+                                                       'document': '[文件]', 'sticker': '[贴纸]'}[kind]
+            if self._load()['topics'][tid].get('closed'):
+                self._reopen(tid)
+            self._store(tid, m['message_id'], m.get('date') or int(self.now()), '我', text)
+            self.touch(PREFIX + tid)
             kept += 1
         with self.lock:
             d = self._load()
-            if username in d['bots']:
-                d['bots'][username]['offset'] = offset
-                self._save(d)
+            d['offset'] = offset
+            self._save(d)
         return kept
 
-    def _owner_wrote(self, username):
-        """The owner's message counts as activity; a freed bot goes back to its previous holder if nobody took it."""
-        rename = None
-        with self.lock:
-            d = self._load()
-            b = d['bots'][username]
-            if not b.get('holder') and b.get('last') and self.key_name(b['last']['holder']) is not None:
-                last = b['last']
-                b.update(holder=last['holder'], holder_name=last['holder_name'], purpose=last['purpose'], name=last['name'],
-                         last=None, claimed_at=int(self.now()))
-                rename = last['name']
-            if b.get('holder'):
-                b['last_activity'] = int(self.now())
-            self._save(d)
-        if rename:
-            self._rename(username, rename)
-            self.log('bots:', username, 'back to its previous holder after the owner wrote to it')
-
     # ------------------------------------------------------------------ background
-    def listen(self, username):
-        t = self.listeners.get(username)
-        if t and t.is_alive():
+    def listen(self):
+        if not self.autolisten or (self.listener and self.listener.is_alive()):
             return
-        t = threading.Thread(target=self._listen, args=(username,), daemon=True)
-        self.listeners[username] = t
-        t.start()
+        self.listener = threading.Thread(target=self._listen, daemon=True)
+        self.listener.start()
 
-    def _listen(self, username):
+    def _listen(self):
         delay = 5
-        while username in self._load()['bots']:
+        while True:
             try:
-                self.poll_once(username)
+                self.poll_once()
                 delay = 5
             except Exception as e:
-                self.log('bots:', username, getattr(e, 'msg', repr(e))[:160])
+                self.log('bots: listen', getattr(e, 'msg', repr(e))[:160])
                 time.sleep(delay)
                 delay = min(delay * 2, 300)
 
     def start(self):
-        for u in self._load()['bots']:
-            self.listen(u)
+        if self._load().get('bot'):
+            self.listen()
         threading.Thread(target=self._housekeeping, daemon=True).start()
 
     def _housekeeping(self):
         while True:
             try:
                 self.sweep()
-                wait = self.fill_step()
+                wait = self.setup_step()
             except Exception as e:
                 self.log('bots: housekeeping', repr(e)[:200])
                 wait = 300

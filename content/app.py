@@ -181,7 +181,7 @@ def make_handler(K):
                     if u.path == '/api/send':
                         res = api_send(f.get('chat', ''), f.get('text', ''), f.get('note', ''), key)
                     elif u.path == '/api/bots':
-                        res = ctx.BOTS.claim(key, f.get('purpose', ''), f.get('username') or None)
+                        res = ctx.BOTS.claim(key, f.get('purpose', ''))
                     else:
                         res = ctx.BOTS.release(key, f.get('chat', ''))
                     return self.send(json.dumps(res, ensure_ascii=False), ctype='application/json; charset=utf-8')
@@ -189,7 +189,7 @@ def make_handler(K):
                 # because we bind to 127.0.0.1); /api/ is the public path and stays read-only.
                 if u.path not in ('/keys/create', '/keys/revoke', '/keys/reset', '/drafts/dismiss', '/capture/start', '/capture/cancel',
                                   '/tg/config', '/tg/login', '/tg/password', '/tg/logout', '/tg/send', '/refresh',
-                                  '/bots/config', '/bots/fill'):
+                                  '/bots/config', '/bots/setup'):
                     return self.send('not found', 404, 'text/plain')
                 # CSRF guard. Some webviews send neither header; the Lazycat login cookie is what really gates this.
                 origin = self.headers.get('Origin') or self.headers.get('Referer') or ''
@@ -199,12 +199,12 @@ def make_handler(K):
                 n = min(int(self.headers.get('Content-Length') or 0), 16384)
                 f = parse_qs(self.rfile.read(n).decode('utf-8', 'replace'))
                 if u.path == '/bots/config':
-                    ctx.BOTS.set_config(size=int(f.get('size', ['5'])[0] or 5), idle_hours=int(f.get('idle_hours', ['72'])[0] or 72))
+                    ctx.BOTS.set_config(idle_hours=int(f.get('idle_hours', ['72'])[0] or 72))
                     log('bots: settings saved')
                     return self.redirect('/settings#bots')
-                if u.path == '/bots/fill':
-                    ctx.BOTS.set_config(fill=f.get('on', [''])[0] == '1')
-                    log('bots: pool switched', 'on' if f.get('on', [''])[0] == '1' else 'off')
+                if u.path == '/bots/setup':
+                    ctx.BOTS.set_config(setup=True)
+                    log('bots: setup requested from the page')
                     return self.redirect('/settings#bots')
                 if u.path == '/refresh':
                     return self.redirect(do_refresh(f.get('to', ['/'])[0]))
