@@ -505,7 +505,9 @@ def bots_settings():
            '<p class="sub">一个 bot 加一个只有你和它的群：agent 每个任务开一个话题，在里面和你对话，消息推到你手机上。'
            '只认你一个人；话题闲置后自动关闭，不会删除任何东西。bot 和群都用你的 Telegram 账号建立。</p>']
     if sm['ready']:
-        out.append(f'<p>已建好 · bot @{e(sm["bot"])} · {sm["open"]} 个话题进行中，{sm["closed"]} 个已结束</p>')
+        out.append(f'<p>已建好 · bot @{e(sm["bot"])} · {sm["open"]} 个话题进行中，{sm["closed"]} 个已结束</p>'
+                   '<p class="sub">如果你在 Telegram 里删了这个 bot 或群，应用会在几分钟内发现；也可以点“重新检查”立刻确认，删掉的会重新建。</p>'
+                   '<form method="post" action="/bots/setup"><button>重新检查</button></form>')
     else:
         if sm['setup']:
             out.append('<p>正在建立…</p>' + RELOAD3_JS)

@@ -23,6 +23,8 @@ PURPOSE_MAX = 20
 CLOSED = '✓ '
 GROUP_TITLE = 'exterior'
 BOT_NAME = 'exterior'
+# There is only one bot: plain usernames first; a random suffix only if all of these are taken (usernames are global)
+USERNAMES = ('exterior_bot', 'exterior_agent_bot', 'exterior_inbox_bot', 'exterior_desk_bot')
 
 
 def is_bot(chat):
@@ -186,8 +188,7 @@ class Bots:
             d = self._load()
             if not d.get('bot'):
                 self.note = '正在通过 BotFather 新建 bot…'
-                username = self._new_username()
-                token = self.tgs.botfather_create(BOT_NAME, username)
+                username, token = self._create_bot()
                 with self.lock:
                     d = self._load()
                     d['bot'] = {'username': username, 'token': token, 'bot_id': int(token.split(':')[0]), 'owner': self.tgs.owner_id()}
@@ -233,6 +234,7 @@ class Bots:
         except TGError as e:
             if gone(e):
                 self._forget('bot', 'group')
+                self.note = f"bot @{b['username']} 已被删除。点“建立”会新建一个 bot 和群"
                 self.log('bots: saved bot', b['username'], 'no longer exists; starting clean')
             return
         if g:
@@ -241,6 +243,7 @@ class Bots:
             except TGError as e:
                 if gone(e):
                     self._forget('group')
+                    self.note = f"对话群已被删除。点“建立”会用 @{b['username']} 新建一个群；想连 bot 也换掉，先在 BotFather 里删掉它"
                     self.log('bots: the group is gone; a new one will be made')
 
     def _forget(self, *what):
@@ -253,11 +256,19 @@ class Bots:
                 d['offset'] = 0
             self._save(d)
 
-    def _new_username(self):
-        for _ in range(8):
-            u = f'exterior_{secrets.token_hex(2)}_bot'
-            if self.tgs.username_free(u):
-                return u
+    def _create_bot(self):
+        """Make the bot through BotFather: the plain usernames first, then a random suffix. A username BotFather refuses
+        (taken or reserved) moves on to the next one; any other refusal stops."""
+        candidates = list(USERNAMES) + [f'exterior_{secrets.token_hex(2)}_bot' for _ in range(4)]
+        for u in candidates:
+            if not self.tgs.username_free(u):
+                continue
+            try:
+                return u, self.tgs.botfather_create(BOT_NAME, u)
+            except TGError as e:
+                if '没有接受这个用户名' in e.msg:
+                    continue
+                raise
         raise TGError('botfather', '找不到可用的用户名，请稍后再试')
 
     # ------------------------------------------------------------------ topics
@@ -451,6 +462,8 @@ class Bots:
         while True:
             try:
                 self.sweep()
+                if self._load().get('bot'):
+                    self._forget_deleted_bot()    # deleted in Telegram? then the page offers the setup again
                 wait = self.setup_step()
             except Exception as e:
                 self.log('bots: housekeeping', repr(e)[:200])

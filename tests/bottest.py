@@ -132,7 +132,17 @@ try:
     s2.set_config(api_id='1', api_hash='h'); open(T2 + '/tg.session', 'w').write('s')
     b2 = tgbot.Bots(T2, ctx.db, ctx.log, s2, key_name=lambda k: None, call=api.call, autolisten=False)
     b2.set_config(setup=True); b2.setup_step()
-    check('without a bot, setup makes exactly one through BotFather', f2.created == 1 and b2.ready() and re.fullmatch(r'exterior_[0-9a-f]{4}_bot', b2._load()['bot']['username']))
+    check('without a bot, setup makes exactly one, with the plain username exterior_bot', f2.created == 1 and b2.ready() and b2._load()['bot']['username'] == 'exterior_bot')
+    T7 = tempfile.mkdtemp(dir=TMP); f7 = Fake(); f7.taken = {'exterior_bot'}; f7.refuse = {'exterior_agent_bot'}
+    s7 = tg.Service(T7, ctx.db, ctx.log, adapter=f7); s7.set_config(api_id='1', api_hash='h'); open(T7 + '/tg.session', 'w').write('s')
+    b7 = tgbot.Bots(T7, ctx.db, ctx.log, s7, key_name=lambda k: None, call=api.call, autolisten=False)
+    b7.set_config(setup=True); b7.setup_step()
+    check('a taken name is skipped, a name BotFather refuses moves on to the next plain one', b7.ready() and b7._load()['bot']['username'] == 'exterior_inbox_bot' and f7.created == 1)
+    f8 = Fake(); f8.taken = set(tgbot.USERNAMES); T8 = tempfile.mkdtemp(dir=TMP)
+    s8 = tg.Service(T8, ctx.db, ctx.log, adapter=f8); s8.set_config(api_id='1', api_hash='h'); open(T8 + '/tg.session', 'w').write('s')
+    b8 = tgbot.Bots(T8, ctx.db, ctx.log, s8, key_name=lambda k: None, call=api.call, autolisten=False)
+    b8.set_config(setup=True); b8.setup_step()
+    check('only when all plain names are taken: a random suffix', re.fullmatch(r'exterior_[0-9a-f]{4}_bot', b8._load()['bot']['username']))
     T3 = tempfile.mkdtemp(dir=TMP); f3 = Fake(); f3.groups = []; s3 = tg.Service(T3, ctx.db, ctx.log, adapter=f3)
     s3.set_config(api_id='1', api_hash='h'); open(T3 + '/tg.session', 'w').write('s')
     f3.botfather_error = tg.TGError('botfather', 'BotFather 没有接受新建：That I cannot do. You come to me asking for more than 20 bots.')
@@ -168,6 +178,17 @@ try:
     check('only the group deleted: same bot, a new group', b5._load()['bot']['token'] == first and f5.created == 1 and len(f5.groups) == 2 and b5.ready())
     api.gone_chats.clear(); api.dead.add(first); b5.set_config(setup=True); b5.setup_step()
     check('the bot deleted after setup: a new bot and a new group on the next click', b5._load()['bot']['token'] != first and f5.created == 2 and len(f5.groups) == 3 and b5.ready())
+
+    # deleted in Telegram while the page says ready: the periodic check notices, the page offers the setup again
+    T6 = tempfile.mkdtemp(dir=TMP); f6 = Fake(); f6.groups = []; s6 = tg.Service(T6, ctx.db, ctx.log, adapter=f6)
+    s6.set_config(api_id='1', api_hash='h'); open(T6 + '/tg.session', 'w').write('s')
+    b6 = tgbot.Bots(T6, ctx.db, ctx.log, s6, key_name=lambda k: None, call=api.call, autolisten=False)
+    b6.set_config(setup=True); b6.setup_step(); tok6 = b6._load()['bot']['token']
+    api.offline.add(tok6); b6._forget_deleted_bot(); api.offline.discard(tok6)
+    check('the periodic check keeps everything on a network error', b6.ready())
+    api.dead.add(tok6); b6._forget_deleted_bot()
+    check('the periodic check notices a deleted bot: no longer ready', not b6.ready() and not b6._load().get('bot'))
+    check('and the page says why, instead of a stale "已建好"', '已被删除' in b6.note)
 
     # ---------------- opening topics
     code, t1 = call('/api/bots', 'POST', {'purpose': '日报'})
@@ -277,7 +298,7 @@ try:
     h = call('/chat?c=' + q(t2['chat']), raw=True)[1]
     check('topic page: who opened it, the purpose, open or closed; records what you read', '开的话题' in h and '盯部署' in h and '已结束' in h and 'wxb_seen_' in h)
     h = call('/settings', raw=True)[1]
-    check('settings: ready, the bot, topic counts, idle timeout', '已建好' in h and '@exterior_0a0a_bot' in h and '进行中' in h and 'name="idle_hours"' in h)
+    check('settings: ready, the bot, topic counts, idle timeout, a re-check button', '已建好' in h and '重新检查' in h and 'action="/bots/setup"' in h and '@exterior_0a0a_bot' in h and '进行中' in h and 'name="idle_hours"' in h)
     check('settings changes are page-only forms', form('/bots/config', idle_hours='48') == 303 and ctx.BOTS.config()['idle_hours'] == 48)
     check('help text explains topics (Telegram, not WeChat)', '/api/bots' in call('/api/help?for=telegram', key=None, raw=True)[1]
           and '/api/bots' not in call('/api/help?for=wechat', key=None, raw=True)[1])

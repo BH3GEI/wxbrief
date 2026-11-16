@@ -13,6 +13,7 @@ class Fake:
         self.msgs[('u', 7)].insert(0, dict(id=4, ts=now - 60, sender='小明', text='看这张', media='img', name=''))
         self.msgs[('u', 7)].insert(0, dict(id=5, ts=now - 30, sender='小明', text='', media='file', name='报价.pdf'))
         self.msgs[('me', 0)] = []
+        self.taken, self.refuse, self.groups, self.started = set(), set(), [], []
     def configure(self, *a): pass
     def status(self): return {'state': self.st, 'qr_url': '', 'error': ''}
     def check(self): return self.st
@@ -42,6 +43,7 @@ class Fake:
     # bot pool support
     owner = 4242
     created = 0
+    serial = 0
     botfather_error = None          # set to a TGError to make the next create fail
     taken = set()
     started = []
@@ -52,9 +54,12 @@ class Fake:
         if self.botfather_error:
             e, self.botfather_error = self.botfather_error, None
             raise e
+        if username in self.refuse:
+            raise tg.TGError('botfather', 'BotFather 没有接受这个用户名：Sorry, this username is already taken.')
         self.created += 1
         self.taken.add(username)
-        return f'{7000 + self.created}:' + 'T' * 34 + str(self.created)
+        Fake.serial += 1          # unique across all fake accounts in one test run
+        return f'{7000 + Fake.serial}:' + 'T' * 34 + str(Fake.serial)
     def start_bot(self, username): self.started.append(username)
     groups = []
     def create_group(self, title, about, bot_username):
