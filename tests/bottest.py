@@ -24,6 +24,7 @@ class BotAPI:
     """Fake Bot API: update queue, sent messages, topics."""
     def __init__(self):
         self.updates, self.sent, self.calls, self.uid, self.next_topic, self.topics = [], [], [], 0, 100, {}
+        self.dead, self.offline = set(), set()
     def push(self, from_id, text, chat_id=GROUP, thread=None, topic=True, **extra):
         self.uid += 1
         m = {'message_id': 1000 + self.uid, 'date': int(time.time()), 'from': {'id': from_id},
@@ -52,6 +53,12 @@ class BotAPI:
             self.topics[p['message_thread_id']]['closed'] = method == 'closeForumTopic'; return True
         if method == 'setMyName':
             return True
+        if method == 'getMe':
+            if token in self.dead:
+                raise tg.TGError('telegram_error', 'Unauthorized')
+            if token in self.offline:
+                raise tg.TGError('network', '连不上 Telegram Bot API：TimeoutError，请检查代理')
+            return {'id': int(token.split(':')[0]), 'is_bot': True}
         raise AssertionError(method)
 
 class K:
@@ -129,6 +136,22 @@ try:
     b3.set_config(setup=True); b3.setup_step()
     check('at the Telegram bot limit: setup stops and explains it', not b3.ready() and b3.config()['setup'] is False and '上限' in b3.note)
     check('the reason survives a restart', '上限' in tgbot.Bots(T3, ctx.db, ctx.log, s3, key_name=lambda k: None, autolisten=False).summary()['note'])
+
+    # a bot the user deleted in BotFather: setup forgets it and starts clean (a network error does not)
+    T4 = tempfile.mkdtemp(dir=TMP); f4 = Fake(); f4.groups = []; s4 = tg.Service(T4, ctx.db, ctx.log, adapter=f4)
+    s4.set_config(api_id='1', api_hash='h'); open(T4 + '/tg.session', 'w').write('s')
+    old = {'bot': {'username': 'exterior_dead_bot', 'token': '7000000009:' + 'D' * 35, 'bot_id': 7000000009, 'owner': f4.owner}}
+    json.dump(old, open(T4 + '/tg_bots.json', 'w'))
+    b4 = tgbot.Bots(T4, ctx.db, ctx.log, s4, key_name=lambda k: None, call=api.call, autolisten=False)
+    def offline_group(*a): raise tg.TGError('network', '连不上 Telegram：TimeoutError，请检查代理')
+    real_group, f4.create_group = f4.create_group, offline_group
+    api.offline.add(old['bot']['token']); b4.set_config(setup=True); b4.setup_step()
+    f4.create_group = real_group
+    check('a network error does not make it forget the saved bot', b4._load()['bot']['username'] == 'exterior_dead_bot' and f4.created == 0)
+    api.offline.clear(); api.dead.add(old['bot']['token']); b4.set_config(setup=True); b4.setup_step()
+    nb = b4._load()['bot']
+    check('a bot deleted in BotFather is forgotten; setup makes a new one and a new group', nb['username'] != 'exterior_dead_bot' and f4.created == 1
+          and b4.ready() and len(f4.groups) == 1 and f4.groups[0][1] == nb['username'])
 
     # ---------------- opening topics
     code, t1 = call('/api/bots', 'POST', {'purpose': '日报'})
@@ -281,7 +304,7 @@ said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('d
 check('the only fixed texts ever sent to BotFather are /newbot and /cancel', said == {'/newbot', '/cancel'}, str(said))
 methods = set(re.findall(r"self\.call\([^,]+, '(\w+)'", botsrc)) | set(re.findall(r"_topic_call\('(\w+)'", botsrc))
 check('Bot API methods used: send, read, rename, create/edit/close/reopen topics; nothing that deletes',
-      methods == {'sendMessage', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
+      methods == {'getMe', 'sendMessage', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
 check('the group is made with manage_topics only', 'ChatAdminRights(manage_topics=True)' in tgsrc)
 
 print('ALL PASS' if ok else 'FAILURES')

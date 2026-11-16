@@ -179,6 +179,7 @@ class Bots:
             self.note = '等待 Telegram 设置和登录'
             return 60
         try:
+            self._forget_deleted_bot()
             d = self._load()
             if not d.get('bot'):
                 self.note = '正在通过 BotFather 新建 bot…'
@@ -215,6 +216,24 @@ class Bots:
                 self.note = '建立失败：' + text[:160]
             self.log('bots: setup failed', text[:200])
             return 600
+
+    def _forget_deleted_bot(self):
+        """If Telegram says the saved bot no longer exists (the user deleted it in BotFather), forget it and everything
+        made with it, so the setup starts clean. A network error is not a reason: only Telegram's explicit answer."""
+        b = self._load().get('bot')
+        if not b:
+            return
+        try:
+            self.call(b['token'], 'getMe', {}, self.proxy())
+        except TGError as e:
+            if e.code == 'telegram_error' and re.search(r'unauthorized|not found', e.msg, re.I):
+                with self.lock:
+                    d = self._load()
+                    for k in ('bot', 'group'):
+                        d.pop(k, None)
+                    d['topics'], d['offset'] = {}, 0
+                    self._save(d)
+                self.log('bots: saved bot', b['username'], 'no longer exists; starting clean')
 
     def _new_username(self):
         for _ in range(8):
