@@ -143,6 +143,7 @@ def ingest(K):
         k = K.key_for(path)
         if k is None:
             STATE['error'] = '密钥未就绪或已失效，等待自动获取（保持微信登录状态）'
+            out.commit(); out.close()
             return new
         plain = WORK + '/' + os.path.basename(path)
         wxdb.decrypt_to(path, k, plain)
@@ -151,6 +152,7 @@ def ingest(K):
             ids = {r[0]: r[1] for r in m.execute('select rowid, user_name from Name2Id')}
             tables = {r[0] for r in m.execute("select name from sqlite_master where type='table' and name like 'Msg_%'")}
             for chat in ids.values():
+                out.commit()    # never hold the write lock across chats or while the next database is decrypted
                 t = 'Msg_' + hashlib.md5(chat.encode()).hexdigest()
                 if t not in tables or SKIP.match(chat):
                     continue
@@ -192,6 +194,7 @@ def ingest(K):
             for chat in ids.values():
                 if chat in names:
                     out.execute('update chats set name=? where chat=?', (names[chat], chat))
+            out.commit()
         finally:
             m.close(); os.remove(plain)
     if backfill:

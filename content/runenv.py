@@ -55,7 +55,10 @@ def wechat_dir_candidates():
 
 
 def find_wechat_dir():
-    """First existing candidate, else the first candidate (for the error message)."""
+    """WECHAT_DIR if set (even when it does not exist yet: never fall back to another WeChat on this machine),
+    else the first existing default location, else the first one (for the error message)."""
+    if os.environ.get('WECHAT_DIR'):
+        return os.environ['WECHAT_DIR']
     first = None
     for c in wechat_dir_candidates():
         if first is None:

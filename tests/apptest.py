@@ -323,6 +323,9 @@ try:
     code, ms = call('/api/messages?chat=tg:g9&live=0&limit=2000')
     check('reading the chat still shows the backfilled history in time order', [m['text'] for m in ms] == [f'远古{i}' for i in range(1, 6)] + ['最近10', '最近11', '最近12', '真正的新消息'], str([m['text'] for m in ms]))
 
+    import runenv
+    check('a WECHAT_DIR that does not exist is used as is, never another WeChat on this machine', runenv.find_wechat_dir() == TMP + '/none' and ctx.WECHAT == TMP + '/none')
+
     # ---- login state shown on settings
     fake.st = 'logged_out'; os.remove(TMP + '/tg.session')
     code, h = call('/settings', raw=True); check('logged out: offers QR login', '用二维码登录' in h.decode())

@@ -627,14 +627,14 @@ class Service:
                 off = 0
                 for _ in range(4):
                     got = self._call(self.adapter.messages, ref, since, hi, cap, off)
-                    new += self._store(c, chat, got, 0)      # newer than the cache: really new
+                    new += self._store(c, chat, got, 0); c.commit()   # newer than the cache: really new. Commit: no write lock during network calls
                     if len(got) < cap:
                         break
                     off = min(m['id'] for m in got)
             if need_back:
                 for _ in range(4):
                     got = self._call(self.adapter.messages, ref, since, 0, cap, lo)
-                    new += self._store(c, chat, got, 1)
+                    new += self._store(c, chat, got, 1); c.commit()   # release the write lock before the next network call
                     if len(got) < cap:
                         cover = since
                         break
@@ -645,7 +645,7 @@ class Service:
                 # nothing inside the window (a chat that has been quiet for a long time): show the latest few anyway,
                 # otherwise the page would be empty and there would be nothing to scroll up from
                 got = self._call(self.adapter.messages, ref, 0, 0, 50, 0)
-                new += self._store(c, chat, got, 1)
+                new += self._store(c, chat, got, 1); c.commit()   # release the write lock before the next network call
                 c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(min([m['ts'] for m in got] or [since]))))
                 if len(got) < 50:
                     c.execute('insert or replace into kv values(?,?)', ('tg:end:' + chat, '1'))
