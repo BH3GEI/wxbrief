@@ -8,8 +8,13 @@ application:
 services:
   worker:
     image: registry.lazycat.cloud/lzc/lzcapp:3.20.3-2
-    command: /bin/sh /lzcapp/pkg/content/start.sh
+    command: /bin/sh /lzcapp/pkg/content/start.sh worker
     environment:
       - TZ=America/Los_Angeles
     tmpfs:
       - /work
+  capture:
+    image: registry.lazycat.cloud/lzc/lzcapp:3.20.3-2
+    command: /bin/sh /lzcapp/pkg/content/start.sh capture
+    environment:
+      - TZ=America/Los_Angeles

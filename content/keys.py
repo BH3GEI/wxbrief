@@ -18,6 +18,13 @@ PASS = VAR + '/pass.bin'
 KEYS = VAR + '/keys.json'
 WECHAT_EXE = '/lzcapp/var/apps/wechat/opt/wechat/wechat'  # path as seen inside the cloud WeChat container
 USE_GDB = runenv.LAZYCAT
+# On Lazycat the privileged part (ptrace) lives in a separate container (capturer.py). The worker
+# only leaves a request file; the capturer writes pass.bin and a status note back into VAR.
+REMOTE = USE_GDB and os.environ.get('CAPTURE_REMOTE') == '1'
+IS_CAPTURER = os.environ.get('ROLE') == 'capture'
+REQ = VAR + '/capture.req'
+NOTE = VAR + '/capture.note'
+ALIVE = VAR + '/capture.alive'
 
 ANCHOR = b'com.Tencent.WCDB.Config.Cipher'
 LEA_RSI, LEA_RDI, FUNC_HEAD = b'\x48\x8d\x35', b'\x48\x8d\x3d', b'\x55\x41\x57'
@@ -37,9 +44,41 @@ class Keys:
         self.passphrase = open(PASS, 'rb').read() if os.path.exists(PASS) else None
         self.state = 'ok' if (self.passphrase or self.cache) else 'need_login'
         self.capturing = False
-        self.capture_note = ''
+        self._note = ''
+        self.cancel = False
         self.gdb = None
+        self._pass_mtime = self._mtime(PASS)
         self.scan_proc = None
+
+    @property
+    def capture_note(self):
+        return self._note
+
+    @capture_note.setter
+    def capture_note(self, v):
+        self._note = v
+        if IS_CAPTURER:
+            try:
+                _write(NOTE, v)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _mtime(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0
+
+    def _reload_pass(self):
+        """Remote mode: pick up a passphrase the capturer saved after the worker started."""
+        m = self._mtime(PASS)
+        if m and m != self._pass_mtime:
+            self._pass_mtime = m
+            self.passphrase = open(PASS, 'rb').read()
+            self.cache = {}
+            return True
+        return False
 
     def key_for(self, path):
         """Return the AES key for a DB file, or None (and start capture) if it can't be opened."""
@@ -49,6 +88,8 @@ class Keys:
             return None
         salt = page[:16].hex()
         with self.lock:
+            if REMOTE:
+                self._reload_pass()
             for k in self.cache.get(salt, []):
                 if wxdb.key_ok(bytes.fromhex(k), page):
                     return bytes.fromhex(k)
@@ -82,7 +123,49 @@ class Keys:
         self.gdb = None
 
     # ---------- capture ----------
+    def request_capture(self, probe_db, force=False):
+        """Explicit (button) request. On Lazycat it goes to the capturer container. force=True
+        captures at the next WeChat login even though the saved key still works."""
+        self.cancel = False
+        if REMOTE:
+            _write(REQ, probe_db + ('\nforce' if force else ''))
+            self._note = '已请求，等待抓取服务'
+        else:
+            self.start_capture(probe_db)
+
+    def cancel_capture(self):
+        """Stop waiting: remove the request (Lazycat) or stop the local loop, and detach gdb."""
+        self.cancel = True
+        if REMOTE:
+            try:
+                os.remove(REQ)
+            except OSError:
+                pass
+            self._note = '已取消'
+        else:
+            self.release()
+
+    def pending(self):
+        return os.path.exists(REQ) if REMOTE else self.capturing
+
+    @staticmethod
+    def capturer_alive():
+        """Lazycat: the capturer container touches capture.alive every few seconds."""
+        try:
+            return time.time() - os.path.getmtime(ALIVE) < 30
+        except OSError:
+            return False
+
     def start_capture(self, probe_db):
+        if REMOTE:
+            try:
+                if not os.path.exists(REQ):
+                    _write(REQ, probe_db)
+                    self.log('key: saved passphrase fails; asked the capturer to wait for a re-login')
+                self._note = open(NOTE).read() if os.path.exists(NOTE) else '等待抓取服务'
+            except OSError as e:
+                self._note = f'无法联系抓取服务：{e}'
+            return
         with self.lock:
             if self.capturing:
                 return
@@ -214,6 +297,9 @@ class Keys:
         page = open(probe_db, 'rb').read(wxdb.PS)
         tried = set()
         while True:
+            if self.cancel:
+                self.capture_note = '已取消'
+                return
             pid = find_wechat_pid()
             if not pid:
                 self.capture_note = 'WeChat is not running'
@@ -252,6 +338,9 @@ class Keys:
                     self.log('key: new passphrase captured and verified')
                     return
             pr.wait()
+            if self.cancel:
+                self.capture_note = '已取消'
+                return
             time.sleep(2)
 
 
@@ -281,9 +370,11 @@ detach
 
 def _write(path, data):
     tmp = path + '.tmp'
+    if isinstance(data, str):
+        data = data.encode()
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'wb') as f:
-        f.write(data.encode() if isinstance(data, str) else data)
+        f.write(data)
     os.replace(tmp, path)
 
 

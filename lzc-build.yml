@@ -3,11 +3,15 @@ manifest: ./lzc-manifest.yml
 contentdir: ./content
 pkgout: ./dist
 icon: ./icon.png
-# The worker reads the cloud WeChat's data read-only, and needs to see/ptrace its process
-# to re-capture the database passphrase after a WeChat re-login.
+# The worker reads the cloud WeChat's data read-only and has no extra privileges.
+# Only the capture service may ptrace WeChat, to re-capture the database passphrase after a
+# re-login; it has no route, no listener, and does not read messages.
 compose_override:
   services:
     worker:
+      volumes:
+        - /lzcsys/data/appvar/cloud.lazycat.catlink.wechat:/wechat:ro
+    capture:
       pid: host
       cap_add:
         - SYS_PTRACE
