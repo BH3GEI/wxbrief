@@ -258,13 +258,14 @@ class Live:
             return out
         return self._run(go(), 60, login=True)
 
-    def messages(self, ref, since_ts, min_id, limit):
+    def messages(self, ref, since_ts, min_id, limit, offset_id=0):
+        """Newest first: ids > min_id, and (when offset_id) ids < offset_id, stopping at since_ts."""
         async def go():
             from telethon import utils
             c = await self._client()
             me = await c.get_me()
             out = []
-            async for m in c.iter_messages(self._peer(ref), limit=limit, min_id=min_id):
+            async for m in c.iter_messages(self._peer(ref), limit=limit, min_id=min_id, offset_id=offset_id):
                 if m.date.timestamp() < since_ts:
                     break
                 if m.action is not None:
@@ -489,37 +490,107 @@ class Service:
         return (kind, i, r[0])
 
     # -- messages
-    def fetch(self, chat, days=30, limit=200, force=False):
-        """Read a chat from Telegram if the cache is older than TTL; returns how many new rows."""
+    def _store(self, c, chat, got):
+        rows = []
+        for m in got:
+            text = m['text']
+            res = None
+            if m['media']:
+                res = 'tg:' + m['media'] + (':' + m['name'] if m['name'] else '')
+                ph = {'img': '[图片]', 'vid': '[视频]', 'voice': '[语音]', 'file': '[文件] ' + m['name']}[m['media']]
+                text = (text + ' ' + ph).strip() if text else ph
+            elif m.get('sticker'):
+                text = f"[贴纸 {m['sticker']}]"
+            rows.append((chat, m['id'], m['ts'], 1, m['sender'], text, res))
+        rows.sort(key=lambda r: (r[2], r[1]))      # Telegram returns newest first; insert oldest first
+        c.executemany('insert or ignore into msgs(chat, local_id, ts, type, sender, text, res) values(?,?,?,?,?,?,?)', rows)
+        return len(rows)
+
+    def fetch(self, chat, days=30, limit=None, force=False):
+        """Bring the cache of one chat up to date; returns how many new rows were stored.
+
+        Three things are tracked so a small earlier request can never leave a hole:
+        - newer than the newest cached message (chained in rounds, so a busy chat leaves no gap);
+        - older than the oldest cached message, back to `days` ago (`tg:cover:<chat>` remembers how far back
+          the cache is known to be complete);
+        - the 60 s cache TTL only applies when the requested window is already covered.
+        How many messages are read from Telegram does not depend on how many the caller wants to see.
+        """
+        cap = FETCH_MAX if not limit else max(1, min(int(limit), FETCH_MAX))
         c = self.db()
         try:
+            now = time.time()
             at = float(self._kv(c, 'tg:fetch:' + chat, 0))
-            if not force and time.time() - at < TTL:
+            cover = float(self._kv(c, 'tg:cover:' + chat, 0))
+            since = now - max(1, int(days)) * 86400
+            need_back = cover == 0 or cover > since + 120
+            if not force and now - at < TTL and not need_back:
                 return 0
             ref = self._ref(c, chat)
-            hi = c.execute('select coalesce(max(local_id),0) from msgs where chat=?', (chat,)).fetchone()[0]
-            since = time.time() - max(1, int(days)) * 86400
-            got = self._call(self.adapter.messages, ref, since, hi, max(1, min(int(limit), FETCH_MAX)))
-            rows = []
-            for m in got:
-                text = m['text']
-                res = None
-                if m['media']:
-                    res = 'tg:' + m['media'] + (':' + m['name'] if m['name'] else '')
-                    ph = {'img': '[图片]', 'vid': '[视频]', 'voice': '[语音]', 'file': '[文件] ' + m['name']}[m['media']]
-                    text = (text + ' ' + ph).strip() if text else ph
-                elif m.get('sticker'):
-                    text = f"[贴纸 {m['sticker']}]"
-                rows.append((chat, m['id'], m['ts'], 1, m['sender'], text, res))
-            rows.sort(key=lambda r: (r[2], r[1]))      # Telegram returns newest first; store oldest first so ids follow time
-            c.executemany('insert or ignore into msgs(chat, local_id, ts, type, sender, text, res) values(?,?,?,?,?,?,?)', rows)
-            top = max([r[1] for r in rows], default=hi)
+            hi, lo = c.execute('select coalesce(max(local_id),0), coalesce(min(local_id),0) from msgs where chat=?', (chat,)).fetchone()
+            new = 0
+            if hi:
+                off = 0
+                for _ in range(4):
+                    got = self._call(self.adapter.messages, ref, since, hi, cap, off)
+                    new += self._store(c, chat, got)
+                    if len(got) < cap:
+                        break
+                    off = min(m['id'] for m in got)
+            if need_back:
+                for _ in range(4):
+                    got = self._call(self.adapter.messages, ref, since, 0, cap, lo)
+                    new += self._store(c, chat, got)
+                    if len(got) < cap:
+                        cover = since
+                        break
+                    cover = min(m['ts'] for m in got)
+                    lo = min(m['id'] for m in got)
+                c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(cover)))
+            if not c.execute('select 1 from msgs where chat=? limit 1', (chat,)).fetchone():
+                # nothing inside the window (a chat that has been quiet for a long time): show the latest few anyway,
+                # otherwise the page would be empty and there would be nothing to scroll up from
+                got = self._call(self.adapter.messages, ref, 0, 0, 50, 0)
+                new += self._store(c, chat, got)
+                c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(min([m['ts'] for m in got] or [since]))))
+                if len(got) < 50:
+                    c.execute('insert or replace into kv values(?,?)', ('tg:end:' + chat, '1'))
+            top = c.execute('select coalesce(max(local_id),0) from msgs where chat=?', (chat,)).fetchone()[0]
             c.execute('insert into chats(chat, name, last_local) values(?,?,?) on conflict(chat) do update set '
                       'last_local=max(last_local, excluded.last_local)',
                       (chat, (c.execute('select name from tg_dialogs where chat=?', (chat,)).fetchone() or [chat])[0], top))
-            c.execute('insert or replace into kv values(?,?)', ('tg:fetch:' + chat, str(time.time())))
+            c.execute('insert or replace into kv values(?,?)', ('tg:fetch:' + chat, str(now)))
             c.commit()
-            return len(rows)
+            return new
+        finally:
+            c.close()
+
+    def at_start(self, chat):
+        """True once the very first message of the chat is cached."""
+        c = self.db()
+        try:
+            return self._kv(c, 'tg:end:' + chat, '0') == '1'
+        finally:
+            c.close()
+
+    def fetch_older(self, chat, n=100):
+        """Read `n` messages older than the oldest cached one (no 30 day limit); marks the start of the chat."""
+        c = self.db()
+        try:
+            lo = c.execute('select coalesce(min(local_id),0) from msgs where chat=?', (chat,)).fetchone()[0]
+            if not lo or self._kv(c, 'tg:end:' + chat, '0') == '1':
+                return 0
+            got = self._call(self.adapter.messages, self._ref(c, chat), 0, 0, n, lo)
+            self._store(c, chat, got)
+            cover = float(self._kv(c, 'tg:cover:' + chat, 0))
+            if len(got) < n:                                   # reached the first message
+                c.execute('insert or replace into kv values(?,?)', ('tg:end:' + chat, '1'))
+                cover = 1
+            elif got:
+                cover = min(cover or 1e18, min(m['ts'] for m in got))
+            c.execute('insert or replace into kv values(?,?)', ('tg:cover:' + chat, str(cover)))
+            c.commit()
+            return len(got)
         finally:
             c.close()
 

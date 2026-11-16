@@ -483,7 +483,7 @@ def api(path, q):
     if path in ('/api/messages', '/api/search'):
         chat = g('chat')
         if tg.is_tg(chat) and path == '/api/messages' and g('live', '1') != '0':
-            TGS.fetch(chat, days=_intq(g, 'days', 30), limit=min(lim, tg.FETCH_MAX))
+            TGS.fetch(chat, days=_intq(g, 'days', 30))
         w, a = [], []
         if kind in KIND_SQL: w.append(KIND_SQL[kind][5:])
         if src in SRC_SQL: w.append(SRC_SQL[src][5:])
@@ -493,8 +493,9 @@ def api(path, q):
         if g('after_id'): w.append('m.id>?'); a.append(_intq(g, 'after_id', 0))
         if g('q'): w.append('m.text like ?'); a.append('%' + g('q') + '%')
         order = 'asc' if g('after_id') or g('since') else 'desc'
+        by = 'm.id' if g('after_id') else 'm.ts'          # ids are for incremental pulls; time order for reading
         sql = ('select m.*, coalesce(ch.name, m.chat) name from msgs m left join chats ch on ch.chat=m.chat '
-               + ('where ' + ' and '.join(w) if w else '') + f' order by m.id {order} limit ?')
+               + ('where ' + ' and '.join(w) if w else '') + f' order by {by} {order}, m.id {order} limit ?')
         c = db()
         try:
             rs = c.execute(sql, a + [lim]).fetchall()
@@ -536,6 +537,9 @@ button.armed{border-color:var(--warn);color:var(--warn);font-weight:600}button.p
 .sec{margin-top:26px;padding-top:6px;border-top:1px solid var(--line)}.sec h3{margin:10px 0 4px}
 .tab2{display:inline-block;margin:6px 6px 0 0;padding:3px 12px;font-size:13px;border:1px solid var(--line);border-radius:999px;background:none;color:var(--mute);cursor:pointer}
 .tab2.on{color:var(--acc);border-color:var(--acc)}
+mark{background:#ffe58a;color:#000;border-radius:3px;padding:0 2px}
+.m.hl{background:color-mix(in srgb,var(--acc) 16%,transparent)}
+.newpill{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:98;background:var(--acc);color:var(--bg);border:0;border-radius:999px;padding:8px 18px;font-size:15px;box-shadow:0 2px 12px #0004}
 #ld{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:6px 14px;border-radius:999px;font-size:14px;display:flex;gap:8px;align-items:center;z-index:99;box-shadow:0 2px 10px #0003}
 #ld[hidden]{display:none}
 .spin{width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .7s linear infinite}
@@ -545,13 +549,35 @@ html.busy:before{content:"";position:fixed;top:0;left:0;height:3px;width:100%;ba
 button:disabled{opacity:.6;cursor:default}
 """
 
-AUTO_JS = """<script>(function(){var q='%s',v0=null;
+AUTO_JS = """<script>(function(){var q='%s',v0=null,chat=q.indexOf('tab=chat')===0,pill=null;
+function on(){try{return localStorage.getItem('wxb_auto')!=='0'}catch(e){return true}}
+function atBottom(){return window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-120}
 function busy(){return document.visibilityState!=='visible'||document.querySelector('button.armed')||document.querySelector('details[open]')||
  [].some.call(document.querySelectorAll('input:not([type=hidden]):not([type=submit]),textarea'),function(i){return i.value})}
-function tick(){if(document.visibilityState!=='visible')return;
+function showPill(){if(pill)return;pill=document.createElement('button');pill.className='newpill';pill.textContent='\u2193 有新消息';
+ pill.onclick=function(){location.reload()};document.body.appendChild(pill)}
+function tick(){if(!on()||document.visibilityState!=='visible')return;
  fetch('/ping?'+q,{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
-  if(v0===null){v0=d.v;return}if(d.v!==v0&&!busy())location.reload()}).catch(function(){})}
-setInterval(tick,15000);tick()})()</script>"""
+  if(v0===null){v0=d.v;return}
+  if(d.v!==v0){if(chat&&!atBottom()){showPill();return}if(!busy())location.reload()}}).catch(function(){})}
+setInterval(tick,10000);tick();
+var t=document.getElementById('autot');
+if(t){var lab=function(){t.textContent='自动刷新：'+(on()?'开':'关');t.classList.toggle('on',on())};lab();
+ t.onclick=function(){try{localStorage.setItem('wxb_auto',on()?'0':'1')}catch(e){}lab()}}
+if(chat){var stick=true,down=function(){window.scrollTo(0,document.documentElement.scrollHeight)},
+ hit=location.hash.length>1&&document.getElementById(location.hash.slice(1));
+ if('scrollRestoration' in history)history.scrollRestoration='manual';   /* a reload must not put us back where we were */
+ if(hit){stick=false;hit.classList.add('hl');hit.scrollIntoView({block:'center'});window.addEventListener('load',function(){hit.scrollIntoView({block:'center'})})}
+ else{down();window.addEventListener('load',down);
+  [].forEach.call(document.images,function(i){if(!i.complete)i.addEventListener('load',function(){if(stick)down()})})}
+ window.addEventListener('wheel',function(e){if(e.deltaY<0)stick=false},{passive:true});
+ window.addEventListener('touchmove',function(){setTimeout(function(){stick=atBottom()},50)},{passive:true});
+ window.addEventListener('keydown',function(e){if(/^(PageUp|ArrowUp|Home)$/.test(e.key))stick=false});
+ window.addEventListener('scroll',function(){if(atBottom())stick=true},{passive:true})}
+})()</script>"""
+
+def auto_toggle():
+    return '<button type="button" class="tab2" id="autot" style="margin:0">自动刷新</button>'
 
 LOAD_HTML = """<div id="ld" hidden><span class="spin"></span><span id="ldt">加载中…</span></div>
 <script>(function(){var ld=document.getElementById('ld'),tm,to;
@@ -615,6 +641,57 @@ def refresh_btn(to):
     return (f'<form class="inline" method="post" action="/refresh"><input type="hidden" name="to" value="{html.escape(to, quote=True)}">'
             '<button class="btn" type="submit" style="margin:0">刷新</button></form>')
 
+OLDER_JS = """<script>(function(){var box=document.getElementById('msgs'),bar=document.getElementById('olderbar'),cid=box.dataset.chat,busy=false,done=false;
+function say(t){bar.textContent=t||''}
+function more(){if(busy||done)return;var f=box.querySelector('.m');if(!f){return}busy=true;say('加载更早的消息…');
+ var top0=f.getBoundingClientRect().top;
+ fetch('/older?c='+encodeURIComponent(cid)+'&ts='+f.dataset.ts+'&id='+f.dataset.id,{credentials:'same-origin',cache:'no-store'})
+ .then(function(r){return r.json()}).then(function(d){
+  if(d.error){say((d.message||'读取失败')+(d.retry_after?'（'+d.retry_after+' 秒后再往上划一下）':'，往上再划一下重试'));busy=false;return}
+  if(d.html){box.insertAdjacentHTML('afterbegin',d.html);var top1=f.getBoundingClientRect().top;window.scrollBy(0,top1-top0)}
+  done=!d.more;say(done?'没有更早的消息了':'');busy=false;
+  if(!done&&document.documentElement.scrollHeight<=innerHeight+60)more()})
+ .catch(function(){say('加载失败，往上再划一下重试');busy=false})}
+window.addEventListener('scroll',function(){if(window.scrollY<120)more()},{passive:true});
+window.addEventListener('load',function(){if(document.documentElement.scrollHeight<=innerHeight+60)more()});
+})()</script>"""
+
+def snippet(text, q, width=70):
+    """The text around the first match, with the match highlighted."""
+    t = text or ''
+    i = t.lower().find(q.lower()) if q else -1
+    if i < 0:
+        return html.escape(t[:120])
+    a, b = max(0, i - width // 3), min(len(t), i + len(q) + width)
+    return (('…' if a > 0 else '') + html.escape(t[a:i]) + '<mark>' + html.escape(t[i:i + len(q)]) + '</mark>'
+            + html.escape(t[i + len(q):b]) + ('…' if b < len(t) else ''))
+
+def search_html(q, source):
+    """Chats whose name matches, then messages whose text matches."""
+    out = []
+    chats = api('/api/chats', {'q': [q], 'source': [source], 'limit': ['8']}) if source == 'wechat' else []
+    for r in chats:
+        out.append(f'<a class="row" href="/chat?c={urllib.parse.quote(r["chat"])}"><div>{html.escape(r["name"])} <span class="sub">会话</span></div>'
+                   f'<div class="sub">{fmt(r["last_ts"])} · {r["n"]} 条</div></a>')
+    hits = api('/api/search', {'q': [q], 'source': [source], 'limit': ['50']})
+    for r in hits:
+        out.append(f'<a class="row" href="/chat?c={urllib.parse.quote(r["chat"])}&around={r["id"]}#m{r["id"]}"><div>{snippet(r["text"], q)}</div>'
+                   f'<div class="sub">{html.escape(r["chat_name"])} · {fmt(r["ts"])}</div></a>')
+    if not out:
+        out.append('<p class="sub">没有找到。</p>')
+    elif len(hits) >= 50:
+        out.append('<p class="sub">只显示最新的 50 条命中。</p>')
+    return ''.join(out)
+
+PINNED = ('tg:me', 'filehelper')    # Saved Messages, 文件传输助手: shown first in the page lists only
+
+def pin_first(rows):
+    """Display order only: nothing is stored and the API keeps its time order. sorted() is stable."""
+    return sorted(rows, key=lambda r: 0 if r['chat'] in PINNED else 1)
+
+def pin_tag(r):
+    return ' <span class="sub">置顶</span>' if r['chat'] in PINNED else ''
+
 def topbar(active):
     on = lambda k: ' class="on"' if active == k else ''
     return (f'<div class="top"><b>消息简报</b><span>{refresh_btn("/" if active == "wx" else "/tg")} <a class="btn" href="/settings">设置</a> <a class="btn" href="/keys">API key</a></span></div>'
@@ -631,14 +708,15 @@ def home(K, q):
     if K.state == 'ok' and STATE['error']:
         out.append(f'<div class="err">{html.escape(STATE["error"])}</div>')
     if s:
-        for r in api('/api/search', {'q': [s], 'source': ['wechat'], 'limit': ['50']}):
-            out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}#m{r["id"]}"><div>{html.escape(r["text"][:120])}</div>'
-                       f'<div class="sub">{html.escape(r["chat_name"])} · {fmt(r["ts"])}</div></a>')
+        out.append(search_html(s, 'wechat'))
     else:
-        for r in api('/api/chats', {'source': ['wechat'], 'limit': ['200']}):
-            out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}"><div>{html.escape(r["name"])}</div>'
+        rows = api('/api/chats', {'source': ['wechat'], 'limit': ['200']})
+        if not any(r['chat'] == 'filehelper' for r in rows):          # may be older than the 200 most recent chats
+            rows += [r for r in api('/api/chats', {'q': ['filehelper'], 'source': ['wechat'], 'limit': ['5']}) if r['chat'] == 'filehelper']
+        for r in pin_first(rows):
+            out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}"><div>{html.escape(r["name"])}{pin_tag(r)}</div>'
                        f'<div class="sub">{fmt(r["last_ts"])} · {r["n"]} 条</div></a>')
-    out.append(f'<p class="sub">读取于 {fmt(STATE["last_ingest"])}</p>')
+    out.append(f'<p class="sub">读取于 {fmt(STATE["last_ingest"])} · {auto_toggle()}</p>')
     return page('微信', ''.join(out), 'tab=wx')
 
 TG_BG = {'running': False, 'error': ''}
@@ -676,12 +754,17 @@ def tg_home(q):
     out.append(drafts_html([d for d in draft_list() if tg.is_tg(d['chat'])]))
     s = s.lstrip('@')
     shown = [r for r in rows if not s or s in (r['name'] or '').lower() or s in (r['username'] or '').lower()]
-    for r in shown:
+    raw_q = q.get('q', [''])[0].strip()
+    for r in pin_first(shown):
         mark = {'u': '', 'g': '群 · ', 'c': '频道 · ', 'me': ''}.get(r['kind'], '')
-        out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}"><div>{html.escape(r["name"] or r["chat"])}</div>'
+        out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}"><div>{html.escape(r["name"] or r["chat"])}{pin_tag(r)}</div>'
                    f'<div class="sub">{mark}{fmt(r["last_ts"])}' + (f' · 已读取 {r["n"]} 条' if r['n'] else '') + '</div></a>')
-    if not shown:
+    if raw_q and shown:
+        out.append('<p class="sub" style="margin-top:10px">会话</p>')
+    if not shown and not raw_q:
         out.append('<p class="sub">' + ('正在读取会话列表…' if TG_BG['running'] or not rows else '没有匹配的会话') + '</p>')
+    if raw_q:
+        out.append('<p class="sub" style="margin-top:14px">消息（只搜已经读取过的会话）</p>' + search_html(raw_q, 'telegram'))
     sent = TGS.sent_log()
     if sent:
         out.append('<details style="margin-top:18px"><summary class="na" style="cursor:pointer">已发送（最近 30 条）</summary>' +
@@ -690,6 +773,7 @@ def tg_home(q):
                    '</details>')
     if TG_BG['running']:
         out.append(RELOAD3_JS)
+    out.append(f'<p class="sub">{auto_toggle()}</p>')
     return page('Telegram', ''.join(out), 'tab=tg')
 
 def chat(q):
@@ -699,9 +783,16 @@ def chat(q):
     c.close()
     back = '/tg' if tg.is_tg(cid) else '/'
     here = '/chat?c=' + urllib.parse.quote(cid)
-    out = [f'<div class="top"><a class="sub" href="{back}">← 返回</a>{refresh_btn(here)}</div><h3>{html.escape(name)}</h3>']
+    out = [f'<div class="top"><a class="sub" href="{back}">← 返回</a><span>{auto_toggle()} {refresh_btn(here)}</span></div><h3>{html.escape(name)}</h3>']
     out.append(drafts_html(draft_list(chat=cid)))
     params = {'chat': [cid], 'limit': ['300']}
+    around = q.get('around', [''])[0]
+    if around.isdigit():
+        c = db()
+        lo = c.execute('select min(id) from (select id from msgs where chat=? and id<? order by id desc limit 100)', (cid, int(around))).fetchone()[0]
+        c.close()
+        params = {'chat': [cid], 'after_id': [str((lo or int(around)) - 1)], 'limit': ['300']}
+        out.append(f'<p class="sub"><a class="file" href="/chat?c={urllib.parse.quote(cid)}">跳到最新消息 ↓</a></p>')
     if tg.is_tg(cid):
         try:
             TGS.fetch(cid)
@@ -709,10 +800,34 @@ def chat(q):
             out.append(f'<div class="err">现在读不到 Telegram 的新消息：{html.escape(e.msg)}'
                        + (f'（{e.retry_after} 秒后再试）' if e.retry_after else '') + '。下面是已缓存的。</div>')
         params['live'] = ['0']
-    for r in api('/api/messages', params):
-        out.append(f'<div class="m" id="m{r["id"]}"><span class="sub">{fmt(r["ts"])}</span> '
-                   f'<span class="w">{html.escape(r["sender"] or "")}</span>：{media_html(r)}</div>')
+    out.append(f'<div id="olderbar" class="sub" style="text-align:center;height:22px;line-height:22px"></div><div id="msgs" data-chat="{html.escape(cid, quote=True)}">')
+    for r in sorted(api('/api/messages', params), key=lambda r: (r['ts'], r['id'])):
+        out.append(msg_html(r))
+    out.append('</div>' + OLDER_JS)
     return page(name, ''.join(out), 'tab=chat&c=' + urllib.parse.quote(cid))
+
+def msg_html(r):
+    return (f'<div class="m" id="m{r["id"]}" data-ts="{r["ts"]}" data-id="{r["id"]}"><span class="sub">{fmt(r["ts"])}</span> '
+            f'<span class="w">{html.escape(r["sender"] or "")}</span>：{media_html(r)}</div>')
+
+def older_page(cid, ts, mid, n=100):
+    """The `n` messages just before (ts, id), oldest first, as HTML. Telegram chats read further back on demand."""
+    def rows_before():
+        c = db()
+        try:
+            return c.execute('select m.*, coalesce(ch.name, m.chat) name from msgs m left join chats ch on ch.chat=m.chat '
+                             'where m.chat=? and (m.ts < ? or (m.ts = ? and m.id < ?)) order by m.ts desc, m.id desc limit ?',
+                             (cid, ts, ts, mid, n + 1)).fetchall()
+        finally:
+            c.close()
+    rows = rows_before()
+    istg = tg.is_tg(cid)
+    if istg and len(rows) <= n and not TGS.at_start(cid):
+        TGS.fetch_older(cid, n)                   # may raise TGError (rate limit etc.)
+        rows = rows_before()
+    more = len(rows) > n or (istg and not TGS.at_start(cid) and bool(rows))
+    rows = rows[:n][::-1]
+    return {'html': ''.join(msg_html(r) for r in rows_json(rows)), 'more': more, 'count': len(rows)}
 
 def media_html(r):
     text = html.escape(r['text'] or '')
@@ -1097,6 +1212,12 @@ def make_handler(K):
                 elif u.path == '/chat': self.send(chat(q))
                 elif u.path == '/tg': self.send(tg_home(q))
                 elif u.path == '/ping': self.send(json.dumps({'v': ping_version(K, q)}), ctype='application/json')
+                elif u.path == '/older':
+                    try:
+                        res = older_page(q.get('c', [''])[0], int(q.get('ts', ['0'])[0]), int(q.get('id', ['0'])[0]))
+                    except tg.TGError as e:
+                        res = e.as_json()
+                    self.send(json.dumps(res, ensure_ascii=False), ctype='application/json; charset=utf-8')
                 elif u.path == '/settings': self.send(settings_page(K))
                 elif u.path in ('/keys', '/token'):
                     self.send(keys_page(base_url(self), q.get('new', [''])[0]))

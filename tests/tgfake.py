@@ -22,10 +22,12 @@ class Fake:
     def dialogs(self):
         self.calls.append('dialogs')
         return [('tg:u7', '小明', 'u', 111, 100, 'xiaoming'), ('tg:g9', '项目群', 'g', None, 200, None), ('tg:me', 'Saved Messages（收藏夹）', 'me', None, 50, None)]
-    def messages(self, ref, since, min_id, limit):
+    def messages(self, ref, since, min_id, limit, offset_id=0):
         self.calls.append(('messages', ref, min_id))
         if self.flood: raise tg.TGError('rate_limited', 'x', self.flood)
-        return [m for m in self.msgs.get((ref[0], ref[1]), []) if m['id'] > min_id and m['ts'] >= since][:limit]
+        ms = [m for m in self.msgs.get((ref[0], ref[1]), []) if m['id'] > min_id and (not offset_id or m['id'] < offset_id) and m['ts'] >= since]
+        ms.sort(key=lambda m: -m['id'])            # newest first, like Telegram
+        return ms[:limit]
     def send(self, ref, text): self.sent.append((ref, text)); return 99, int(time.time())
     def download(self, ref, mid, destdir):
         self.calls.append(('download', mid))

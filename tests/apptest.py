@@ -142,6 +142,9 @@ try:
     check('chat page has a refresh button that returns to the same chat', 'name="to" value="/chat?c=tg%3Au7"' in h and 'tab=chat' in h)
     h = call('/settings', raw=True)[1].decode()
     check('settings page does not auto-refresh (would wipe what you type)', '/ping?' not in h)
+    h = call('/chat?c=tg:u7', raw=True)[1].decode()
+    check('chat page: scrolls to the latest, has the auto-refresh switch and the new-messages pill logic', 'scrollTo(0,document.documentElement.scrollHeight)' in h and 'id="autot"' in h and 'newpill' in h)
+    check('home and Telegram tabs also have the auto-refresh switch', all('id="autot"' in call(u, raw=True)[1].decode() for u in ('/', '/tg')))
 
     n0 = fake.calls.count('dialogs')
     code, _ = post_form('/refresh', to='/tg'); check('refresh on the Telegram tab re-reads the dialog list now', code == 303 and fake.calls.count('dialogs') == n0 + 1)
@@ -174,6 +177,81 @@ try:
     fake.flood = 30; app.TGS.flood_until = 0
     kv = app.db(); kv.execute("delete from kv where k like 'tg:fetch:%'"); kv.commit(); kv.close()
     check('ping survives Telegram being rate limited', call('/ping?tab=chat&c=tg%3Au7', raw=True)[0] == 200)
+    fake.flood = 0; app.TGS.flood_until = 0
+
+    # ---- search: names + text, highlighted, jumps to the hit even in old history
+    c = app.db(); c.execute("insert into chats(chat,name,last_local) values('wxid_big','资料群',1)")
+    for i in range(1, 401):
+        c.execute("insert into msgs(chat,local_id,ts,type,sender,text) values('wxid_big',?,?,1,'小王',?)", (i, int(time.time()) - 9000 + i, f'第{i}条 ' + ('针对报价的讨论 ' if i == 20 else '普通内容')))
+    c.commit(); target = c.execute("select id from msgs where chat='wxid_big' and local_id=20").fetchone()[0]; c.close()
+    h = call('/?q=' + up.quote('报价'), raw=True)[1].decode()
+    check('WeChat search finds message text, highlighted, with a link that jumps to it', '<mark>报价</mark>' in h and f'around={target}#m{target}' in h)
+    h = call('/?q=' + up.quote('资料'), raw=True)[1].decode()
+    check('WeChat search also finds chats by name', '资料群' in h and '会话' in h)
+    h = call(f'/chat?c=wxid_big&around={target}', raw=True)[1].decode()
+    check('old hit: the chat page loads the window around it, not just the latest 300', f'id="m{target}"' in h and '第20条' in h and '跳到最新消息' in h)
+    check('window around a hit does not drag in the whole chat', '第400条' not in h)
+    h = call('/chat?c=wxid_big', raw=True)[1].decode()
+    check('without around the page is the latest messages', '第400条' in h and '第20条' not in h)
+    h = call('/tg?q=msg2', raw=True)[1].decode()
+    check('Telegram search finds cached message text, highlighted', '<mark>msg2</mark>' in h and '只搜已经读取过的会话' in h)
+    h = call('/tg?q=' + up.quote('项目'), raw=True)[1].decode()
+    check('Telegram search still matches chat names', '项目群' in h)
+    check('snippet shows the area around a late match', '<mark>X</mark>' in app.snippet('a' * 200 + 'X' + 'b' * 200, 'X') and app.snippet('a' * 200 + 'X', 'X').startswith('…'))
+    check('snippet escapes html', '&lt;b&gt;' in app.snippet('<b>hi</b>', 'hi') and '<b>' not in app.snippet('<b>hi</b>', 'hi'))
+
+    # ---- pinned chats: display only
+    c = app.db(); c.execute("insert into chats(chat,name,last_local) values('filehelper','文件传输助手',1)")
+    c.execute("insert into msgs(chat,local_id,ts,type,sender,text) values('filehelper',1,?,1,'我','很久以前的一条')", (int(time.time()) - 86400 * 400,))
+    c.commit(); before = [tuple(r) for r in c.execute('select chat, local_id, id from msgs order by id')]; nchats = c.execute('select count(*) from chats').fetchone()[0]; c.close()
+    h = call('/', raw=True)[1].decode()
+    check('WeChat tab: 文件传输助手 is first, even though it is the oldest chat', h.index('文件传输助手') < h.index('小王') < h.index('资料群') and '置顶' in h)
+    h = call('/tg', raw=True)[1].decode()
+    check('Telegram tab: Saved Messages is first, even though it is the oldest', h.index('Saved Messages') < h.index('项目群') < h.index('小明') and '置顶' in h)
+    c = app.db(); after = [tuple(r) for r in c.execute('select chat, local_id, id from msgs order by id')]; n2 = c.execute('select count(*) from chats').fetchone()[0]; c.close()
+    check('pinning writes nothing to the database', before == after and nchats == n2)
+    check('the API keeps its time order (Saved Messages last, not pinned)', [x['chat'] for x in call('/api/chats?source=telegram')[1]] == ['tg:g9', 'tg:u7', 'tg:me'])
+    check('WeChat API order also unchanged (filehelper is oldest)', [x['chat'] for x in call('/api/chats?source=wechat')[1]][-1] == 'filehelper')
+
+    # ---- history is shown in time order even when older messages were filled in later
+    now2 = int(time.time())
+    fake.msgs[('g', 9)] = [dict(id=i, ts=now2 - (6 * 86400 if i <= 2 else 3600 * (10 - i)), sender='甲', text=f'群消息{i}', media=None, name='') for i in range(6, 0, -1)]
+    call('/api/messages?chat=tg:g9&days=1&limit=2'); code, ms = call('/api/messages?chat=tg:g9&days=30&limit=50')
+    check('a small first request does not stop the full history from loading', code == 200 and len(ms) == 6, str(len(ms)))
+    check('API returns messages in time order after a backfill', [m['text'] for m in ms] == [f'群消息{i}' for i in range(1, 7)])
+    h = call('/chat?c=tg:g9', raw=True)[1].decode()
+    check('chat page shows them in time order too', h.index('群消息1') < h.index('群消息3') < h.index('群消息6'))
+
+    # ---- scroll to the top loads older messages
+    h = call('/chat?c=wxid_big', raw=True)[1].decode()
+    check('chat page has the container, per-message cursors and the loader', 'id="msgs"' in h and 'data-ts=' in h and "'/older?c='" in h)
+    first_id = int(re.search(r'<div class="m" id="m(\d+)"', h).group(1)) if (re := __import__('re')) else 0
+    c = app.db(); r = c.execute('select ts, id, local_id from msgs where id=?', (first_id,)).fetchone(); c.close()
+    code, d = call(f'/older?c=wxid_big&ts={r["ts"]}&id={r["id"]}')
+    check('WeChat: older page returns the 100 messages before the first shown', code == 200 and d['count'] == 100 and '第1条' in d['html'] and '第100条' in d['html'] and d['more'] is False, str((r['local_id'], d.get('count'), d.get('more'))))
+    check('older messages come oldest first', d['html'].index('第1条') < d['html'].index('第50条') < d['html'].index('第100条'))
+    c = app.db(); mid = c.execute("select ts, id from msgs where chat='wxid_big' and local_id=300").fetchone(); c.close()
+    seen, ts_, id_, rounds, more = [], mid['ts'], mid['id'], 0, True
+    while more and rounds < 10:
+        code, d = call(f'/older?c=wxid_big&ts={ts_}&id={id_}')
+        nums = [int(x) for x in re.findall(r'第(\d+)条', d['html'])]
+        seen += nums; rounds += 1; more = d['more']
+        c = app.db(); row = c.execute("select ts, id from msgs where chat='wxid_big' and local_id=?", (min(nums),)).fetchone(); c.close(); ts_, id_ = row['ts'], row['id']
+    check('paging up repeatedly walks the whole history with no gaps or repeats', sorted(seen) == list(range(1, 300)) and len(set(seen)) == len(seen) and more is False, f'{len(seen)} {rounds}')
+
+    fake.msgs[('me', 0)] = [dict(id=i, ts=int(time.time()) - 90 * 86400 + i, sender='我', text=f'收藏{i}', media=None, name='') for i in range(120, 0, -1)]
+    h = call('/chat?c=tg:me', raw=True)[1].decode()
+    check('Telegram: a chat quiet for 90 days still opens with its latest 50', '收藏120' in h and '收藏71' in h and '收藏70' not in h)
+    first_id = int(re.search(r'<div class="m" id="m(\d+)"', h).group(1))
+    c = app.db(); r = c.execute('select ts, id from msgs where id=?', (first_id,)).fetchone(); c.close()
+    code, d = call(f'/older?c=tg:me&ts={r["ts"]}&id={r["id"]}')
+    check('Telegram: scrolling up reads older messages from Telegram on demand', code == 200 and d['count'] == 70 and '收藏1' in d['html'] and '收藏70' in d['html'], str(d.get('count')))
+    check('Telegram: the start of the chat is reached and reported', d['more'] is False)
+    fake.flood = 30; app.TGS.flood_until = 0
+    c = app.db(); c.execute('delete from msgs where chat="tg:me" and local_id<100'); c.execute("delete from kv where k='tg:end:tg:me'"); c.commit(); c.close()
+    c = app.db(); r = c.execute('select ts, id from msgs where chat="tg:me" order by ts limit 1').fetchone(); c.close()
+    code, d = call(f'/older?c=tg:me&ts={r["ts"]}&id={r["id"]}')
+    check('Telegram: rate limit while scrolling gives a message the page can show', d.get('error') == 'rate_limited' and d.get('retry_after') == 30 and 'message' in d, str(d))
     fake.flood = 0; app.TGS.flood_until = 0
 
     # ---- login state shown on settings
