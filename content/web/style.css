@@ -30,4 +30,8 @@ mark{background:#ffe58a;color:#000;border-radius:3px;padding:0 2px}
 @keyframes sp{to{transform:rotate(360deg)}}
 html.busy:before{content:"";position:fixed;top:0;left:0;height:3px;width:100%;background:var(--acc);z-index:99;transform-origin:0 50%;animation:bar 1.2s ease-in-out infinite}
 @keyframes bar{0%{transform:scaleX(0);opacity:1}70%{transform:scaleX(.9);opacity:1}100%{transform:scaleX(1);opacity:.15}}
+.fold{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+.fold .arrow{transition:transform .15s;display:inline-block;margin-right:6px;color:var(--mute)}.fold.open .arrow{transform:rotate(90deg)}
+.badge{background:var(--warn);color:var(--bg);border-radius:999px;font-size:12px;padding:0 7px;margin-left:6px}
+#botlist .row{padding-left:18px}.row.unread>div:first-child{font-weight:600}
 button:disabled{opacity:.6;cursor:default}

@@ -49,6 +49,15 @@ DELETE /api/drafts/<id>    忽略一条
 - 限流时返回 `429 {"error":"rate_limited","retry_after":秒}`。
 - **现查搜索**：`/api/search?q=…&source=telegram&live=1`（可加 `&chat=`）直接向 Telegram 搜全部历史，结果只返回、不存库。
 
+## 和 agent 对话的 bot 池
+
+设置页里开启后，应用用你的 Telegram 账号经 @BotFather 在后台建好一批 bot（上限默认 5，用户名 `exterior_xxxx_bot`）。agent 用 `POST /api/bots {purpose}` 领一个，显示名变成“key 名 · 用途”，通过 `POST /api/send` 发给你（推到手机），用 `GET /api/wait` 等你回复。
+
+- 每个 bot 只认你一个人，别人发给它的消息直接丢弃；只有领取它的 key 能通过它发消息；一个 key 可以领多个。
+- 闲置 72 小时（可改）自动回收；回收后你先回复它，它会回到原来的 agent。
+- 只走 BotFather 的 `/newbot` 流程，没有删除、重置 token 等能力；token 只存在 `tg_bots.json`（0600），接口不返回。
+- 池子的上限、闲置时间、开关只能在网页上改。BotFather 的会话对 agent 隐藏（里面有历史 token）。
+
 ## 通讯录
 
 `GET /api/contacts?q=&source=&kind=&type=`：微信和 Telegram 的通讯录（含没聊过的人），带 `has_chat`、`chat`（会话 ID）。Telegram 不读手机号。微信的表里保存了见过的所有人，默认只返回好友和群（内部类型 1、2）；类型 3 是在群里见过的人，`type=3` 或 `kind=all` 才返回。
@@ -64,7 +73,7 @@ DELETE /api/drafts/<id>    忽略一条
 
 ## 代码结构
 
-`content/` 下：`app.py`（HTTP 和启动）、`ctx.py`（路径、日志、数据库、共享的服务）、`wechat.py`（读微信数据库）、`api.py`（给 agent 的接口和说明文字）、`pages.py`（网页），`web/` 是页面用的 CSS 和 JS；`tg.py` 是 Telegram，`keys.py` / `capturer.py` 是微信密钥。测试：`python3 tests/apptest.py`、`tests/tgtest.py`、`tests/synthtest.py`。
+`content/` 下：`app.py`（HTTP 和启动）、`ctx.py`（路径、日志、数据库、共享的服务）、`wechat.py`（读微信数据库）、`api.py`（给 agent 的接口和说明文字）、`pages.py`（网页），`web/` 是页面用的 CSS 和 JS；`tg.py` 是 Telegram，`tgbot.py` 是 bot 池，`keys.py` / `capturer.py` 是微信密钥。测试：`python3 tests/apptest.py`、`tests/tgtest.py`、`tests/bottest.py`、`tests/locktest.py`、`tests/synthtest.py`。
 
 ## Windows
 

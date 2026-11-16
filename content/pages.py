@@ -1,9 +1,9 @@
 """The phone-sized web pages. Static CSS / JS live in web/."""
-import html, os, threading, time
+import html, json, os, threading, time
 import urllib.parse
 from urllib.parse import parse_qs
 
-import ctx, tg, runenv
+import ctx, tg, runenv, tgbot
 from api import agent_line, api, draft_list, rows_json
 from ctx import INGEST_NOW, STATE, db
 
@@ -90,6 +90,7 @@ def refresh_btn(to):
             '<button class="btn" type="submit" style="margin:0">刷新</button></form>')
 
 OLDER_JS = '<script>' + _asset('older.js') + '</script>'
+FOLD_JS = '<script>' + _asset('fold.js') + '</script>'
 
 def snippet(text, q, width=70):
     """The text around the first match, with the match highlighted."""
@@ -190,6 +191,30 @@ def _tg_refresh_bg():
             TG_BG['running'] = False
     threading.Thread(target=go, daemon=True).start()
 
+def bots_fold():
+    """The bot pool as one folded row at the top of the Telegram tab (display only)."""
+    bots = ctx.BOTS.list() if ctx.BOTS else []
+    if not bots:
+        return ''
+    c = db()
+    rows, latest = [], (0, '')
+    try:
+        for b in bots:
+            m = c.execute('select ts, sender, text from msgs where chat=? order by ts desc, id desc limit 1', (b['chat'],)).fetchone()
+            last_in = c.execute("select coalesce(max(id),0) from msgs where chat=? and sender != '我'", (b['chat'],)).fetchone()[0]
+            if m and m['ts'] > latest[0]:
+                latest = (m['ts'], f"{b['name']}：{(m['text'] or '')[:30]}")
+            state = (f"使用中 · {html.escape(b['holder'] or '')} · 最后活动 {fmt(b['last_activity'])}" if b['status'] == 'busy' else '空闲')
+            rows.append(f'<a class="row" href="/chat?c={urllib.parse.quote(b["chat"])}" data-chat="{html.escape(b["chat"])}" data-last="{last_in}">'
+                        f'<div>{html.escape(b["name"])}</div><div class="sub">{state}' +
+                        (f' · {html.escape((m["text"] or "")[:40])}' if m else '') + '</div></a>')
+    finally:
+        c.close()
+    busy = sum(1 for b in bots if b['status'] == 'busy')
+    return (f'<div class="fold" id="botfold"><div><span class="arrow">▶</span>exterior <span class="sub">{len(bots)} 个 bot · {busy} 个在用</span>'
+            f'<span class="badge" id="botnew" hidden></span><div class="sub">{html.escape(latest[1]) if latest[0] else "还没有消息"}</div></div>'
+            f'<span class="sub">{fmt(latest[0]) if latest[0] else ""}</span></div><div id="botlist" hidden>{"".join(rows)}</div>' + FOLD_JS)
+
 def tg_home(q):
     s = q.get('q', [''])[0].lower()
     out = [topbar('tg')]
@@ -208,9 +233,15 @@ def tg_home(q):
         out.append(f'<div class="err">{html.escape(TG_BG["error"])}</div>')
     out.append(drafts_html([d for d in draft_list() if tg.is_tg(d['chat'])]))
     s = s.lstrip('@')
-    shown = [r for r in rows if not s or s in (r['name'] or '').lower() or s in (r['username'] or '').lower()]
+    dup = ctx.BOTS.user_side_chats() if ctx.BOTS else set()      # the pool bots are shown in the folded row instead
+    shown = [r for r in rows if r['chat'] not in dup and (not s or s in (r['name'] or '').lower() or s in (r['username'] or '').lower())]
     raw_q = q.get('q', [''])[0].strip()
-    for r in pin_first(shown):
+    pinned = [r for r in pin_first(shown) if r['chat'] in PINNED]
+    for i, r in enumerate(pinned + [r for r in shown if r['chat'] not in PINNED] + [None]):
+        if i == len(pinned) and not raw_q:
+            out.append(bots_fold())
+        if r is None:
+            break
         mark = {'u': '', 'g': '群 · ', 'c': '频道 · ', 'me': ''}.get(r['kind'], '')
         out.append(f'<a class="row" href="/chat?c={html.escape(r["chat"])}"><div>{html.escape(r["name"] or r["chat"])}{pin_tag(r)}</div>'
                    f'<div class="sub">{mark}{fmt(r["last_ts"])}' + (f' · 已读取 {r["n"]} 条' if r['n'] else '') + '</div></a>')
@@ -237,17 +268,27 @@ def chat(q):
     c = db()
     name = (c.execute('select name from chats where chat=?', (cid,)).fetchone() or [cid])[0]
     c.close()
-    back = '/tg' if tg.is_tg(cid) else '/'
+    isbot = tgbot.is_bot(cid)
+    back = '/tg' if tg.is_tg(cid) or isbot else '/'
     here = '/chat?c=' + urllib.parse.quote(cid)
     out = [f'<div class="top"><a class="sub" href="{back}">← 返回</a><span>{auto_toggle()} {refresh_btn(here)}</span></div><h3>{html.escape(name)}</h3>']
+    if isbot and ctx.BOTS:
+        b = ctx.BOTS.get(cid) or {}
+        out.append('<p class="sub">' + (f"{html.escape(b.get('holder_name') or '')} 在用 · 用途：{html.escape(b.get('purpose') or '')} · "
+                                        f"最后活动 {fmt(b.get('last_activity'))}" if b.get('holder') else '空闲，还没有 agent 在用') +
+                   f" · @{html.escape(cid[len(tgbot.PREFIX):])}</p>")
     out.append(drafts_html(draft_list(chat=cid)))
     params = {'chat': [cid], 'limit': ['300']}
     around = q.get('around', [''])[0]
     if around.isdigit():
+        # the window around a search hit, by time (ids do not follow time for history filled in later)
         c = db()
-        lo = c.execute('select min(id) from (select id from msgs where chat=? and id<? order by id desc limit 100)', (cid, int(around))).fetchone()[0]
+        t = c.execute('select ts, id from msgs where id=?', (int(around),)).fetchone()
+        lo = c.execute('select min(ts) from (select ts from msgs where chat=? and (ts < ? or (ts = ? and id < ?)) '
+                       'order by ts desc, id desc limit 100)', (cid, t['ts'], t['ts'], t['id'])).fetchone()[0] if t else None
         c.close()
-        params = {'chat': [cid], 'after_id': [str((lo or int(around)) - 1)], 'limit': ['300']}
+        if t:
+            params = {'chat': [cid], 'since': [str((lo if lo is not None else t['ts']) - 1)], 'limit': ['300']}
         out.append(f'<p class="sub"><a class="file" href="/chat?c={urllib.parse.quote(cid)}">跳到最新消息 ↓</a></p>')
     if tg.is_tg(cid):
         try:
@@ -260,6 +301,9 @@ def chat(q):
     for r in sorted(api('/api/messages', params), key=lambda r: (r['ts'], r['id'])):
         out.append(msg_html(r))
     out.append('</div>' + OLDER_JS)
+    if isbot:      # remember what has been read, for the unread badge on the folded bot row
+        c = db(); top = c.execute('select coalesce(max(id),0) from msgs where chat=?', (cid,)).fetchone()[0]; c.close()
+        out.append(f"<script>try{{localStorage.setItem({json.dumps('wxb_seen_' + cid)},'{top}')}}catch(e){{}}</script>")
     return page(name, ''.join(out), 'tab=chat&c=' + urllib.parse.quote(cid))
 
 def msg_html(r):
@@ -362,9 +406,10 @@ def ping_version(K, q):
                 ctx.TGS.dialogs()
             except tg.TGError:
                 pass
-            m = f"{ctx.TGS._kv(c, 'tg:dialogs_at', 0)}:{c.execute('select coalesce(max(id),0) from tg_sent').fetchone()[0]}"
+            bots_top = c.execute("select coalesce(max(id),0) from msgs where chat like 'tgbot:%'").fetchone()[0]
+            m = f"{ctx.TGS._kv(c, 'tg:dialogs_at', 0)}:{c.execute('select coalesce(max(id),0) from tg_sent').fetchone()[0]}:{bots_top}"
         else:
-            m = c.execute("select coalesce(max(id),0) from msgs where chat not like 'tg:%'").fetchone()[0]
+            m = c.execute("select coalesce(max(id),0) from msgs where chat not like 'tg:%' and chat not like 'tgbot:%'").fetchone()[0]
         return f'{m}:{d[0]}-{d[1]}:{K.state}'
     finally:
         c.close()
@@ -448,4 +493,31 @@ def settings_page(K):
              f'<label class="sub">代理（盒子连不上 Telegram 时需要）</label><input name="proxy" placeholder="socks5://地址:端口" value="{e(st["proxy"])}">'
              '<button class="pri">保存</button></form></details></div>')
     out.append(''.join(t))
+    out.append(bots_settings())
     return page('设置', ''.join(out) + TWO_JS)
+
+def bots_settings():
+    if not ctx.BOTS:
+        return ''
+    e = html.escape
+    sm = ctx.BOTS.summary()
+    out = ['<div class="sec" id="bots"><h3>和 agent 对话的 bot</h3>',
+           f'<p>已建 <b>{sm["total"]}</b> / 上限 {sm["size"]} · {sm["busy"]} 个在用</p>',
+           '<p class="sub">agent 领一个 bot，通过它在 Telegram 上和你对话，消息会推到你手机上。bot 只认你一个人，'
+           '闲置超时后自动回收。bot 用你的 Telegram 账号经 BotFather 创建；应用不会删除或修改任何 bot 的 token。</p>']
+    if sm['note']:
+        out.append(f'<p class="sub">进度：{e(sm["note"])}</p>')
+    if sm['fill']:
+        out.append('<form method="post" action="/bots/fill"><input type="hidden" name="on" value="0"><button>暂停自动建 bot</button></form>')
+    elif sm['total'] < sm['size']:
+        out.append(f'<form class="two" method="post" action="/bots/fill"><input type="hidden" name="on" value="1">'
+                   f'<button class="pri" data-ask="再点一次：用你的 Telegram 账号建 {sm["size"] - sm["total"]} 个 bot">开始建立 bot 池</button></form>')
+    for b in ctx.BOTS.list():
+        state = f'{e(b["holder"] or "")} 在用 · 最后活动 {fmt(b["last_activity"])}' if b['status'] == 'busy' else '空闲'
+        out.append(f'<div class="row"><a href="/chat?c={urllib.parse.quote(b["chat"])}">{e(b["name"])}</a>'
+                   f'<div class="sub">@{e(b["username"])} · {state}</div></div>')
+    out.append('<form method="post" action="/bots/config" style="margin-top:12px">'
+               f'<label class="sub">上限（个，最多 20）</label><input name="size" inputmode="numeric" value="{sm["size"]}">'
+               f'<label class="sub">闲置多久自动回收（小时）</label><input name="idle_hours" inputmode="numeric" value="{sm["idle_hours"]}">'
+               '<button>保存</button></form></div>')
+    return ''.join(out)

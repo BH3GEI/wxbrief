@@ -8,8 +8,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor'))
-import runenv, ctx, wxdb, media, apikeys, keys as keymod, tg
-from api import api, api_send, draft_create, draft_dismiss, draft_get, draft_list, help_text, tg_reply
+import runenv, ctx, wxdb, media, apikeys, keys as keymod, tg, tgbot
+from api import api, api_send, draft_create, draft_dismiss, draft_get, draft_list, help_text, tg_reply, wait_new
 from ctx import STATE, VAR, WECHAT, db, init_store, log
 from pages import base_url, chat, do_refresh, home, keys_page, older_page, page, ping_version, settings_page, tg_home, tgsearch_page
 from wechat import VOICES, account_dir, ingest_loop
@@ -92,7 +92,8 @@ def make_handler(K):
                 if u.path == '/api/help':
                     return self.send(help_text(base_url(self), q.get('for', ['all'])[0]), ctype='text/plain; charset=utf-8')
                 if u.path.startswith('/api/'):
-                    if not ctx.APIKEYS.check(self.headers.get('Authorization', '')):
+                    key = ctx.APIKEYS.check(self.headers.get('Authorization', ''))
+                    if not key:
                         return self.send('{"error":"unauthorized"}', 401, 'application/json')
                     if mm and mm.group(1):
                         return self.send_media(int(mm.group(2)), thumb)
@@ -101,10 +102,15 @@ def make_handler(K):
                     elif u.path == '/api/status':
                         res = {'key': K.state, 'capture': K.capture_note, 'image_key': ctx.IK.state, 'capturer': K.capturer_alive(),
                                'telegram': {k: v for k, v in ctx.TGS.status().items() if k in ('configured', 'state', 'me')},
+                               'bots': ctx.BOTS.summary() if ctx.BOTS else None,
                                'platform': sys.platform, 'zstd': 'ok' if wxdb.zstd_ok() else 'missing',
                                **{k: v for k, v in STATE.items() if k != 'acc'}}
+                    elif u.path == '/api/bots':
+                        res = ctx.BOTS.list(key['id'])
+                    elif u.path == '/api/wait':
+                        res = wait_new(q, key)
                     else:
-                        res = api(u.path, q)
+                        res = api(u.path, q, agent=True)
                     if res is None:
                         return self.send('{"error":"not found"}', 404, 'application/json')
                     return self.send(json.dumps(res, ensure_ascii=False), ctype='application/json; charset=utf-8')
@@ -161,8 +167,9 @@ def make_handler(K):
                         return self.send('{"error":"chat and body required"}', 400, 'application/json')
                     return self.send(json.dumps(d, ensure_ascii=False), 201 if 'id' in d else 200,
                                      'application/json; charset=utf-8')
-                if u.path == '/api/send':
-                    if not ctx.APIKEYS.check(self.headers.get('Authorization', '')):
+                if u.path in ('/api/send', '/api/bots', '/api/bots/release'):
+                    key = ctx.APIKEYS.check(self.headers.get('Authorization', ''))
+                    if not key:
                         return self.send('{"error":"unauthorized"}', 401, 'application/json')
                     n = min(int(self.headers.get('Content-Length') or 0), 64 * 1024)
                     try:
@@ -171,12 +178,18 @@ def make_handler(K):
                             raise ValueError('JSON object required')
                     except Exception as e:
                         return self.send(json.dumps({'error': f'invalid json: {e}'}), 400, 'application/json')
-                    return self.send(json.dumps(api_send(f.get('chat', ''), f.get('text', ''), f.get('note', '')),
-                                                ensure_ascii=False), ctype='application/json; charset=utf-8')
+                    if u.path == '/api/send':
+                        res = api_send(f.get('chat', ''), f.get('text', ''), f.get('note', ''), key)
+                    elif u.path == '/api/bots':
+                        res = ctx.BOTS.claim(key, f.get('purpose', ''), f.get('username') or None)
+                    else:
+                        res = ctx.BOTS.release(key, f.get('chat', ''))
+                    return self.send(json.dumps(res, ensure_ascii=False), ctype='application/json; charset=utf-8')
                 # Key management is web-only (on Lazycat behind its login; on desktop only reachable
                 # because we bind to 127.0.0.1); /api/ is the public path and stays read-only.
                 if u.path not in ('/keys/create', '/keys/revoke', '/keys/reset', '/drafts/dismiss', '/capture/start', '/capture/cancel',
-                                  '/tg/config', '/tg/login', '/tg/password', '/tg/logout', '/tg/send', '/refresh'):
+                                  '/tg/config', '/tg/login', '/tg/password', '/tg/logout', '/tg/send', '/refresh',
+                                  '/bots/config', '/bots/fill'):
                     return self.send('not found', 404, 'text/plain')
                 # CSRF guard. Some webviews send neither header; the Lazycat login cookie is what really gates this.
                 origin = self.headers.get('Origin') or self.headers.get('Referer') or ''
@@ -185,6 +198,14 @@ def make_handler(K):
                     return self.send(page('出错了', '<p>请求来源不对，请从本页面操作。</p><p><a class="file" href="/keys">← 回到 key 管理</a></p>'), 403)
                 n = min(int(self.headers.get('Content-Length') or 0), 16384)
                 f = parse_qs(self.rfile.read(n).decode('utf-8', 'replace'))
+                if u.path == '/bots/config':
+                    ctx.BOTS.set_config(size=int(f.get('size', ['5'])[0] or 5), idle_hours=int(f.get('idle_hours', ['72'])[0] or 72))
+                    log('bots: settings saved')
+                    return self.redirect('/settings#bots')
+                if u.path == '/bots/fill':
+                    ctx.BOTS.set_config(fill=f.get('on', [''])[0] == '1')
+                    log('bots: pool switched', 'on' if f.get('on', [''])[0] == '1' else 'off')
+                    return self.redirect('/settings#bots')
                 if u.path == '/refresh':
                     return self.redirect(do_refresh(f.get('to', ['/'])[0]))
                 if u.path == '/tg/config':
@@ -253,6 +274,8 @@ def main():
     init_store()
     ctx.APIKEYS = apikeys.ApiKeys()
     ctx.TGS = tg.Service(VAR, db, log)
+    ctx.BOTS = tgbot.Bots(VAR, db, log, ctx.TGS, key_name=lambda kid: (ctx.APIKEYS.get(kid) or {}).get('name'),
+                          proxy=lambda: ctx.TGS.config().get('proxy', ''))
     K = keymod.Keys(log, account_dir)
     ctx.KEYS = K
     ctx.IK = media.ImageKey(log)
@@ -266,6 +289,7 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     threading.Thread(target=ingest_loop, args=(K,), daemon=True).start()
+    ctx.BOTS.start()
     bind = runenv.bind_host()
     port = int(os.environ.get('PORT', 3000))
     log(f'listening on http://{bind}:{port}' + ('' if bind == "0.0.0.0" else ''))

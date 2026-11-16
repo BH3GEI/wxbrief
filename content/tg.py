@@ -333,6 +333,54 @@ class Live:
                      u.username, u.access_hash) for u in getattr(res, 'users', [])]
         return self._run(go(), 60, login=True)
 
+    def me_id(self):
+        async def go():
+            c = await self._client()
+            return (await c.get_me()).id
+        return self._run(go(), 20, login=True)
+
+    def username_free(self, username):
+        """True if nobody uses this @username (a bot about to be created needs a free one)."""
+        async def go():
+            c = await self._client()
+            try:
+                await c.get_entity(username)
+                return False
+            except (ValueError, TypeError):
+                return True
+        return self._run(go(), 20, login=True)
+
+    def create_bot(self, name, username):
+        """The fixed /newbot dialogue with @BotFather; returns the token. Nothing else is ever sent to BotFather
+        (no /deletebot, /revoke, /setname ...). On any unexpected answer the dialogue is cancelled."""
+        async def go():
+            c = await self._client()
+            async with c.conversation('BotFather', timeout=30, exclusive=False) as conv:
+                async def say(text):
+                    await conv.send_message(text)
+                    return (await conv.get_response()).raw_text or ''
+                r = await say('/newbot')
+                if 'name' not in r.lower():
+                    raise TGError('botfather', 'BotFather 没有接受新建：' + r[:200])
+                r = await say(name)
+                if 'username' not in r.lower():
+                    await conv.send_message('/cancel')
+                    raise TGError('botfather', 'BotFather 没有接受这个名字：' + r[:200])
+                r = await say(username)
+                m = re.search(r'\b(\d{6,12}:[A-Za-z0-9_-]{30,})\b', r)
+                if not m:
+                    await conv.send_message('/cancel')
+                    raise TGError('botfather', 'BotFather 没有接受这个用户名：' + r[:200])
+                return m.group(1)
+        return self._run(go(), 120, login=True)
+
+    def start_bot(self, username):
+        """/start to our own new bot, so that it may write to us."""
+        async def go():
+            c = await self._client()
+            await c.send_message(username, '/start')
+        return self._run(go(), 30, login=True)
+
     def send(self, ref, text):
         async def go():
             c = await self._client()
@@ -751,6 +799,19 @@ class Service:
                 except OSError:
                     pass
         return removed
+
+    # -- bot pool support (tgbot.Bots); the only BotFather access in the app
+    def botfather_create(self, name, username):
+        return self._call(self.adapter.create_bot, name, username)
+
+    def owner_id(self):
+        return self._call(self.adapter.me_id)
+
+    def username_free(self, username):
+        return self._call(self.adapter.username_free, username)
+
+    def start_bot(self, username):
+        return self._call(self.adapter.start_bot, username)
 
     # -- sending
     def send_direct(self, chat, text):

@@ -321,6 +321,9 @@ try:
     code, inc = call(f'/api/messages?after_id={cursor}')
     check('a message that really arrives later does come through after_id', [m['text'] for m in inc if m['chat'] == 'tg:g9'] == ['真正的新消息'], str([m['text'] for m in inc]))
     code, ms = call('/api/messages?chat=tg:g9&live=0&limit=2000')
+    c = ctx.db(); hit = c.execute("select id from msgs where chat='tg:g9' and text='远古3'").fetchone()[0]; c.close()
+    h = call(f'/chat?c=tg:g9&around={hit}', raw=True)[1].decode()
+    check('a search hit in backfilled history opens at that message', f'id="m{hit}"' in h and '远古3' in h)
     check('reading the chat still shows the backfilled history in time order', [m['text'] for m in ms] == [f'远古{i}' for i in range(1, 6)] + ['最近10', '最近11', '最近12', '真正的新消息'], str([m['text'] for m in ms]))
 
     import runenv

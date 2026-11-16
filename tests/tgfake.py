@@ -39,6 +39,23 @@ class Fake:
                 if q.lower() in m['text'].lower(): out.append(dict(m, chat=ids.get(peer, 'tg:u1'), media=m.get('media')))
         out += [dict(id=900 + i, chat='tg:u7', ts=int(time.time()) - 900 * 86400, sender='小明', text=f'很久以前的{q}{i}', media=None, name='') for i in range(2)] if q == '很久以前' and (not ref or ref[0] == 'u') else []
         return out[:limit]
+    # bot pool support
+    owner = 4242
+    created = 0
+    botfather_error = None          # set to a TGError to make the next create fail
+    taken = set()
+    started = []
+    def me_id(self): return self.owner
+    def username_free(self, u): return u not in self.taken
+    def create_bot(self, name, username):
+        self.calls.append(('create_bot', name, username))
+        if self.botfather_error:
+            e, self.botfather_error = self.botfather_error, None
+            raise e
+        self.created += 1
+        self.taken.add(username)
+        return f'{7000 + self.created}:' + 'T' * 34 + str(self.created)
+    def start_bot(self, username): self.started.append(username)
     def contacts(self):
         self.calls.append('contacts')
         return [('tg:u7', '小明', 'xiaoming', 111), ('tg:u50', '没聊过的人', 'nochat', 222)]

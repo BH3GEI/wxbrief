@@ -8,6 +8,7 @@ TGS = None       # tg.Service
 APIKEYS = None   # apikeys.ApiKeys
 IK = None        # media.ImageKey
 KEYS = None      # keys.Keys (WeChat database keys)
+BOTS = None      # tgbot.Bots (bot pool)
 
 
 VAR = runenv.var_dir()
