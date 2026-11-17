@@ -139,7 +139,8 @@ class Bots:
         g = d.get('group') or {}
         return {'chat': PREFIX + str(tid), 'name': t['name'], 'status': 'closed' if t.get('closed') else 'open',
                 'holder': t.get('holder_name'), 'purpose': t.get('purpose'), 'last_activity': t.get('last_activity'),
-                'mine': bool(key_id and t.get('holder') == key_id), 'link': f"https://t.me/c/{g.get('channel_id')}/{tid}"}
+                'mine': bool(key_id and t.get('holder') == key_id), 'link': f"https://t.me/c/{g.get('channel_id')}/{tid}",
+                'user_created': bool(t.get('user_created')), 'deleted': bool(t.get('deleted'))}
 
     def list(self, key_id=None):
         d = self._load()
@@ -345,7 +346,8 @@ class Bots:
         """Close topics that have been idle for longer than the configured timeout."""
         d = self._load()
         limit = self.now() - d['config']['idle_hours'] * 3600
-        idle = [tid for tid, t in d['topics'].items() if not t.get('closed') and (t.get('last_activity') or 0) < limit]
+        idle = [tid for tid, t in d['topics'].items()
+                if not t.get('closed') and not t.get('user_created') and (t.get('last_activity') or 0) < limit]
         for tid in idle:
             self._close(tid)
             self.log('bots: topic idle, closed:', tid)
@@ -358,6 +360,69 @@ class Bots:
             if t:
                 t['last_activity'] = int(self.now())
                 self._save(d)
+
+    # ------------------------------------------------------------------ topics the user creates
+    def adopt(self, key):
+        """The calling key takes the topics the user creates in the group himself (exterior). One adopter at a time."""
+        self._need_ready()
+        with self.lock:
+            d = self._load()
+            d['config']['adopter'] = {'id': key['id'], 'name': key['name']}
+            self._save(d)
+        self.log('bots: adopter is now', key['name'])
+        return {'status': 'adopting', 'holder': key['name']}
+
+    def _adopt_topic(self, tid, name):
+        d = self._load()
+        a = d['config'].get('adopter')
+        if not a or tid in d['topics']:
+            return False
+        name = (name or f'话题 {tid}')[:120]
+        with self.lock:
+            d = self._load()
+            d['topics'][tid] = {'name': name, 'holder': a['id'], 'holder_name': a['name'], 'purpose': name[:PURPOSE_MAX],
+                                'created': int(self.now()), 'last_activity': int(self.now()), 'closed': False,
+                                'user_created': True}
+            self._save(d)
+        self._chat_row(tid, name)
+        self.log('bots: user created topic', tid, name)
+        return True
+
+    def _rename_topic(self, tid, name):
+        with self.lock:
+            d = self._load()
+            t = d['topics'].get(tid)
+            if not t or not t.get('user_created') or not name:
+                return
+            t['name'], t['purpose'] = name[:120], name[:PURPOSE_MAX]
+            self._save(d)
+        self._chat_row(tid, name[:120])
+
+    def _mark_deleted(self, tid):
+        with self.lock:
+            d = self._load()
+            if tid in d['topics']:
+                d['topics'][tid]['deleted'] = True
+                d['topics'][tid]['closed'] = True
+                self._save(d)
+
+    def commands(self, key, commands):
+        """The adopter sets the "/" menu of the group: [{command, description}]. An empty list clears it."""
+        a = self._load()['config'].get('adopter') or {}
+        if a.get('id') != key['id']:
+            raise TGError('not_holder', '只有接管用户话题的 key（POST /api/bots/adopt）能设置命令菜单')
+        if not isinstance(commands, list) or len(commands) > 100:
+            raise TGError('bad_commands', 'commands 要是列表，最多 100 条')
+        clean = []
+        for c in commands:
+            name, desc = str((c or {}).get('command', '')).lstrip('/'), str((c or {}).get('description', '')).strip()
+            if not re.fullmatch(r'[a-z0-9_]{1,32}', name) or not 1 <= len(desc) <= 256:
+                raise TGError('bad_commands', f'命令名只能是 1-32 个小写字母、数字、下划线，说明 1-256 字：{name[:40]}')
+            clean.append({'command': name, 'description': desc})
+        d = self._load()
+        self.call(d['bot']['token'], 'setMyCommands', {'commands': clean, 'scope': {'type': 'chat', 'chat_id': d['group']['id']}},
+                  self.proxy())
+        return {'status': 'set', 'count': len(clean)}
 
     # ------------------------------------------------------------------ talking
     def send(self, key, chat, text):
@@ -375,8 +440,14 @@ class Bots:
         if t.get('closed'):
             self._reopen(tid)
         d = self._load()
-        m = self.call(d['bot']['token'], 'sendMessage', {'chat_id': d['group']['id'], 'message_thread_id': int(tid), 'text': text},
-                      self.proxy())
+        try:
+            m = self.call(d['bot']['token'], 'sendMessage', {'chat_id': d['group']['id'], 'message_thread_id': int(tid), 'text': text},
+                          self.proxy())
+        except TGError as e:
+            if 'THREAD NOT FOUND' in e.msg.upper().replace('_', ' '):
+                self._mark_deleted(tid)
+                raise TGError('topic_deleted', '这个话题已经在 Telegram 里删掉了')
+            raise
         mid = self._store(tid, m['message_id'], m.get('date') or int(self.now()), t['name'], text)
         self.touch(chat)
         return {'status': 'sent', 'chat': chat, 'id': mid}
@@ -467,6 +538,14 @@ class Bots:
             offset = max(offset, up['update_id'] + 1)
             m = up.get('message') or {}
             tid = str(m.get('message_thread_id') or '')
+            if m and (m.get('from') or {}).get('id') == b['owner'] and (m.get('chat') or {}).get('id') == g.get('id') and tid:
+                made = m.get('forum_topic_created') or ((m.get('reply_to_message') or {}).get('forum_topic_created') or {})
+                if (m.get('forum_topic_created') or m.get('is_topic_message')) and tid not in d['topics']:
+                    if self._adopt_topic(tid, made.get('name')):
+                        d = self._load()
+                if (m.get('forum_topic_edited') or {}).get('name'):
+                    self._rename_topic(tid, m['forum_topic_edited']['name'])
+                    d = self._load()
             if (not m or (m.get('from') or {}).get('id') != b['owner'] or (m.get('chat') or {}).get('id') != g.get('id')
                     or not m.get('is_topic_message') or tid not in d['topics']):
                 continue                                          # only the user, only in the group's known topics

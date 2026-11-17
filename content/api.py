@@ -213,7 +213,7 @@ def api(path, q, agent=False):
 TG_HTTP = {'rate_limited': 429, 'not_logged_in': 409, 'not_configured': 409, 'needs_approval': 403,
            'unknown_chat': 404, 'no_media': 404, 'not_available': 404, 'network': 502, 'timeout': 504,
            'telegram_error': 502, 'hidden': 403, 'not_holder': 403, 'not_ready': 409,
-           'botfather': 502, 'unknown_message': 404}
+           'botfather': 502, 'unknown_message': 404, 'topic_deleted': 410}
 
 def tg_reply(handler, e):
     body = json.dumps(e.as_json(), ensure_ascii=False)
@@ -334,6 +334,9 @@ GET /api/wait?chat=tgbot:话题号&after_id=<上面返回的 id>   等我回复�
         echo "$r"                                                 # 每输出一行，就是我新发来的消息
         last=$(printf '%s' "$r" | python3 -c 'import sys,json;print(max(m["id"] for m in json.load(sys.stdin)))')
       done
+POST /api/bots/adopt  {}  （给 exterior 这类常驻程序用）由你这个 key 接管我自己在群里新建的话题：之后我建的话题都归你，标题就是名字，我改标题会跟着改；这类话题不会因闲置被关。同一时间只有一个 key 接管。
+POST /api/bots/commands  {commands: [{command, description}]}  接管者设置群里的「/」命令菜单；命令名只能是小写字母、数字、下划线。
+    话题在 Telegram 里被删掉后，往里发消息会返回 410 topic_deleted，GET /api/bots 里它的 deleted 为 true。
 POST /api/bots/release   {chat}  任务结束时关闭话题（可选）。不关的话，闲置一段时间（默认 72 小时，我可以改）后自动关闭，标题前加“✓ ”。
     话题不会被删除；关闭后我回复，或你再在里面发消息，它会重新打开，仍然归你。
 """

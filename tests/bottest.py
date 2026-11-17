@@ -25,7 +25,7 @@ class BotAPI:
     def __init__(self):
         self.updates, self.sent, self.calls, self.uid, self.next_topic, self.topics = [], [], [], 0, 100, {}
         self.dead, self.offline, self.gone_chats = set(), set(), set()
-        self.edited, self.reacted = [], []
+        self.edited, self.reacted, self.menus, self.deleted_threads = [], [], [], set()
     def push(self, from_id, text, chat_id=GROUP, thread=None, topic=True, **extra):
         self.uid += 1
         m = {'message_id': 1000 + self.uid, 'date': int(time.time()), 'from': {'id': from_id},
@@ -42,6 +42,10 @@ class BotAPI:
         self.calls.append((method, p))
         if method == 'getUpdates':
             return [u for u in self.updates if u['update_id'] >= p.get('offset', 0)]
+        if method == 'sendMessage' and p.get('message_thread_id') in self.deleted_threads:
+            raise tg.TGError('telegram_error', 'Bad Request: message thread not found')
+        if method == 'setMyCommands':
+            self.menus.append(p); return True
         if method == 'sendMessage':
             self.sent.append((p['chat_id'], p.get('message_thread_id'), p['text']))
             return {'message_id': 500 + len(self.sent), 'date': int(time.time())}
@@ -305,6 +309,42 @@ try:
     code, rel = call('/api/bots/release', 'POST', {'chat': t1['chat']})
     check('release closes it now', code == 200 and api.topics[tid1]['closed'] and state()['topics'][str(tid1)]['closed'])
 
+    # ---------------- topics the user creates himself (exterior adopts them)
+    api.push(fake.owner, None, thread=300, forum_topic_created={'name': '先建的'}); ctx.BOTS.poll_once()
+    check('without an adopter, topics the user creates are ignored', '300' not in state()['topics'])
+    code, e = call('/api/bots/commands', 'POST', {'commands': [{'command': 'cc_cost', 'description': 'claude · 用量'}]})
+    check('no menu before adopting', code == 403 and e['error'] == 'not_holder')
+    code, ad = call('/api/bots/adopt', 'POST', {})
+    check('a key adopts the user\'s topics', code == 200 and ad['status'] == 'adopting')
+    api.push(fake.owner, None, thread=301, forum_topic_created={'name': '报销'}); ctx.BOTS.poll_once()
+    t301 = state()['topics'].get('301') or {}
+    check('a topic the user creates is taken by the adopter, titled as he named it', t301.get('holder') == A['id'] and t301.get('name') == '报销' and t301.get('user_created'), str(t301))
+    api.push(fake.owner, '第一句', thread=302, reply_to_message={'forum_topic_created': {'name': 'soulrun'}}); ctx.BOTS.poll_once()
+    code, ms = call('/api/messages?chat=tgbot:302')
+    check('a first message in a topic created earlier also adopts it, and is kept', (state()['topics'].get('302') or {}).get('name') == 'soulrun' and [m['text'] for m in ms] == ['第一句'], str(ms))
+    api.push(fake.owner, None, thread=301, forum_topic_edited={'name': '报销 11月'}); ctx.BOTS.poll_once()
+    check('renaming the topic in Telegram renames it here', state()['topics']['301']['name'] == '报销 11月')
+    code, lst = call('/api/bots')
+    check('GET /api/bots marks them user_created and mine', any(x['chat'] == 'tgbot:301' and x['user_created'] and x['mine'] for x in lst))
+    code, r301 = call('/api/send', 'POST', {'chat': 'tgbot:301', 'text': '收到'})
+    check('the adopter writes in them', code == 200 and api.sent[-1] == (GROUP, 301, '收到'))
+    code, e = call('/api/send', 'POST', {'chat': 'tgbot:301', 'text': 'x'}, key=B)
+    check('other keys cannot', code == 403)
+    clock[0] += 500 * 3600; ctx.BOTS.sweep()
+    check('the user\'s own topics are never closed for being idle', not state()['topics']['301'].get('closed'))
+    code, e = call('/api/bots/commands', 'POST', {'commands': [{'command': 'cc_cost', 'description': 'claude · 用量'}]}, key=B)
+    check('only the adopter sets the menu', code == 403)
+    code, e = call('/api/bots/commands', 'POST', {'commands': [{'command': 'cc_cost', 'description': 'claude · 用量'}, {'command': '/pi_compact', 'description': 'pi · 压缩'}]})
+    check('the adopter sets the group\'s "/" menu', code == 200 and e['count'] == 2 and api.menus[-1]['scope'] == {'type': 'chat', 'chat_id': GROUP}
+          and [c['command'] for c in api.menus[-1]['commands']] == ['cc_cost', 'pi_compact'], str(e))
+    code, e = call('/api/bots/commands', 'POST', {'commands': [{'command': 'deep-research', 'description': 'x'}]})
+    check('bad command names are refused', code == 400 and e['error'] == 'bad_commands')
+    api.deleted_threads.add(302)
+    code, e = call('/api/send', 'POST', {'chat': 'tgbot:302', 'text': '还在吗'})
+    check('a topic deleted in Telegram answers 410 topic_deleted', code == 410 and e['error'] == 'topic_deleted', str(e))
+    code, lst = call('/api/bots')
+    check('and shows as deleted', any(x['chat'] == 'tgbot:302' and x['deleted'] for x in lst))
+
     # ---------------- secrets and hidden chats
     c = ctx.db()
     c.executemany('insert into tg_dialogs(chat,name,kind,hash,last_ts,username) values(?,?,?,?,?,?)',
@@ -329,7 +369,7 @@ try:
     # ---------------- pages
     h = call('/tg', raw=True)[1]
     check('Telegram tab: one folded "exterior" row, closed by default', 'id="botfold"' in h and '<div id="botlist" hidden>' in h)
-    check('closed topics are folded once more under "已结束"', 'id="closedfold"' in h and '已结束 3 个' in h and '0 个进行中' in h and '<div id="closedlist" hidden>' in h)
+    check('closed topics are folded once more under "已结束"', 'id="closedfold"' in h and '已结束 4 个' in h and '1 个进行中' in h and '<div id="closedlist" hidden>' in h)
     check('the folded rows are not <details> (would pause auto refresh)', '<details' not in h[h.index('id="botfold"'):h.index('id="closedlist"')])
     check('your own copies of the bot chat and group are not listed separately', '/chat?c=tg:u7000000001' not in h and '/chat?c=tg:g5550001' not in h)
     h = call('/chat?c=' + q(t2['chat']), raw=True)[1]
@@ -382,7 +422,7 @@ said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('d
 check('the only fixed texts ever sent to BotFather are /newbot and /cancel', said == {'/newbot', '/cancel'}, str(said))
 methods = set(re.findall(r"self\.call\([^,]+, '(\w+)'", botsrc)) | set(re.findall(r"_topic_call\('(\w+)'", botsrc))
 check('Bot API methods used: send, edit own messages, react, read, rename, create/edit/close/reopen topics; nothing that deletes',
-      methods == {'getMe', 'getChat', 'sendMessage', 'editMessageText', 'setMessageReaction', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
+      methods == {'getMe', 'getChat', 'sendMessage', 'editMessageText', 'setMessageReaction', 'setMyCommands', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
 check('the group is made with manage_topics only', 'ChatAdminRights(manage_topics=True)' in tgsrc)
 
 print('ALL PASS' if ok else 'FAILURES')
