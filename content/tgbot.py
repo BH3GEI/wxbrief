@@ -381,6 +381,59 @@ class Bots:
         self.touch(chat)
         return {'status': 'sent', 'chat': chat, 'id': mid}
 
+    def _target(self, key, chat, mid, user):
+        """A stored message in the key's own topic: the user's (user=True) or the bot's. Returns (tid, local_id)."""
+        t = self.get(chat)
+        if not t:
+            raise TGError('unknown_chat', '没有这个话题')
+        if t.get('holder') != key['id']:
+            raise TGError('not_holder', '这个话题不是你开的')
+        try:
+            mid = int(mid)
+        except (TypeError, ValueError):
+            raise TGError('unknown_message', 'id 要写发送时返回的那个数字')
+        c = self.db()
+        try:
+            row = c.execute('select local_id, sender from msgs where id=? and chat=?', (mid, chat)).fetchone()
+        finally:
+            c.close()
+        if not row or (row[1] == '我') != user:
+            raise TGError('unknown_message', '这个话题里没有这条消息' + ('（只能给我发的消息加表情）' if user else '（只能改你自己发的消息）'))
+        return chat[len(PREFIX):], row[0]
+
+    def edit(self, key, chat, mid, text):
+        """Replace the text of a message the bot sent (for streaming a reply as it is written)."""
+        tid, local = self._target(key, chat, mid, user=False)
+        text = (text or '').strip()
+        if not text:
+            raise TGError('empty', '内容是空的')
+        if len(text) > 4096:
+            raise TGError('too_long', 'Telegram 单条消息最多 4096 字')
+        d = self._load()
+        try:
+            self.call(d['bot']['token'], 'editMessageText', {'chat_id': d['group']['id'], 'message_id': local, 'text': text}, self.proxy())
+        except TGError as e:
+            if 'NOT MODIFIED' not in e.msg.upper().replace('_', ' '):
+                raise
+        c = self.db()
+        try:
+            c.execute('update msgs set text=? where id=?', (text, int(mid)))
+            c.commit()
+        finally:
+            c.close()
+        self.touch(chat)
+        return {'status': 'edited', 'chat': chat, 'id': int(mid)}
+
+    def react(self, key, chat, mid, emoji='👀'):
+        """Put one emoji reaction on a message of the user (e.g. 👀 = seen). An empty emoji removes it."""
+        tid, local = self._target(key, chat, mid, user=True)
+        emoji = (emoji or '').strip()
+        d = self._load()
+        self.call(d['bot']['token'], 'setMessageReaction', {'chat_id': d['group']['id'], 'message_id': local,
+                  'reaction': [{'type': 'emoji', 'emoji': emoji}] if emoji else []}, self.proxy())
+        self.touch(chat)
+        return {'status': 'reacted', 'chat': chat, 'id': int(mid), 'emoji': emoji}
+
     def _chat_row(self, tid, name):
         c = self.db()
         try:

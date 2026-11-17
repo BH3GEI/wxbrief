@@ -168,7 +168,7 @@ def make_handler(K):
                         return self.send('{"error":"chat and body required"}', 400, 'application/json')
                     return self.send(json.dumps(d, ensure_ascii=False), 201 if 'id' in d else 200,
                                      'application/json; charset=utf-8')
-                if u.path in ('/api/send', '/api/bots', '/api/bots/release'):
+                if u.path in ('/api/send', '/api/edit', '/api/react', '/api/bots', '/api/bots/release'):
                     key = ctx.APIKEYS.check(self.headers.get('Authorization', ''))
                     if not key:
                         return self.send('{"error":"unauthorized"}', 401, 'application/json')
@@ -181,6 +181,13 @@ def make_handler(K):
                         return self.send(json.dumps({'error': f'invalid json: {e}'}), 400, 'application/json')
                     if u.path == '/api/send':
                         res = api_send(f.get('chat', ''), f.get('text', ''), f.get('note', ''), key)
+                    elif u.path in ('/api/edit', '/api/react'):
+                        if not (ctx.BOTS and tgbot.is_bot(f.get('chat', ''))):
+                            raise tg.TGError('unknown_chat', '只能在你用 POST /api/bots 开的话题里用')
+                        if u.path == '/api/edit':
+                            res = ctx.BOTS.edit(key, f.get('chat', ''), f.get('id'), f.get('text', ''))
+                        else:
+                            res = ctx.BOTS.react(key, f.get('chat', ''), f.get('id'), f.get('emoji', '👀'))
                     elif u.path == '/api/bots':
                         res = ctx.BOTS.claim(key, f.get('purpose', ''))
                     else:

@@ -25,6 +25,7 @@ class BotAPI:
     def __init__(self):
         self.updates, self.sent, self.calls, self.uid, self.next_topic, self.topics = [], [], [], 0, 100, {}
         self.dead, self.offline, self.gone_chats = set(), set(), set()
+        self.edited, self.reacted = [], []
     def push(self, from_id, text, chat_id=GROUP, thread=None, topic=True, **extra):
         self.uid += 1
         m = {'message_id': 1000 + self.uid, 'date': int(time.time()), 'from': {'id': from_id},
@@ -44,6 +45,10 @@ class BotAPI:
         if method == 'sendMessage':
             self.sent.append((p['chat_id'], p.get('message_thread_id'), p['text']))
             return {'message_id': 500 + len(self.sent), 'date': int(time.time())}
+        if method == 'editMessageText':
+            self.edited.append((p['chat_id'], p['message_id'], p['text'])); return {'message_id': p['message_id']}
+        if method == 'setMessageReaction':
+            self.reacted.append((p['chat_id'], p['message_id'], p['reaction'])); return True
         if method == 'createForumTopic':
             self.next_topic += 1; self.topics[self.next_topic] = {'name': p['name'], 'closed': False}
             return {'message_thread_id': self.next_topic, 'name': p['name']}
@@ -217,13 +222,14 @@ try:
     code, e = call('/api/send', 'POST', {'chat': t1['chat'], 'text': 'hi'}, key=B)
     check('another key cannot write in my topic', code == 403 and e['error'] == 'not_holder')
     code, r = call('/api/send', 'POST', {'chat': t1['chat'], 'text': '日报写好了，要看吗？'})
+    api_mid = 500 + len(api.sent)
     check('the opener sends at once into its topic, gets the stored id', code == 200 and r['status'] == 'sent' and api.sent[-1] == (GROUP, tid1, '日报写好了，要看吗？'))
     check('the bot only ever writes into the group', all(c == GROUP for c, _, _ in api.sent))
     code, ms = call('/api/messages?chat=' + q(t1['chat']))
     check('the message is stored in the topic chat, source telegram', ms[-1]['text'] == '日报写好了，要看吗？' and ms[-1]['source'] == 'telegram' and ms[-1]['sender'] == 'Claude Code · 日报')
 
     # ---------------- receiving: the user only, in known topics only
-    api.push(fake.owner, '要，发我', thread=tid1)
+    api.push(fake.owner, '要，发我', thread=tid1); user_uid = api.uid
     api.push(999, '陌生人', thread=tid1)
     api.push(fake.owner, '私聊里发给 bot', chat_id=fake.owner)
     api.push(fake.owner, '群里的 General', thread=None)
@@ -233,6 +239,24 @@ try:
     code, inc = call(f"/api/messages?after_id={r['id']}")
     check("only the user's messages in known topics are kept", kept == 1 and [m['text'] for m in inc] == ['要，发我'] and inc[0]['sender'] == '我' and inc[0]['chat'] == t1['chat'])
     check('updates are not read twice', ctx.BOTS.poll_once() == 0)
+
+    # ---------------- editing my own message (streaming) and reacting to the user's (seen)
+    code, e = call('/api/edit', 'POST', {'chat': t1['chat'], 'id': r['id'], 'text': '日报写好了，要看吗？（改）'})
+    check('the opener edits its own message in place', code == 200 and e['status'] == 'edited' and api.edited[-1] == (GROUP, api_mid, '日报写好了，要看吗？（改）'), str(e))
+    code, ms = call('/api/messages?chat=' + q(t1['chat']))
+    check('the stored text follows the edit', [m['text'] for m in ms if m['id'] == r['id']] == ['日报写好了，要看吗？（改）'])
+    code, e = call('/api/edit', 'POST', {'chat': t1['chat'], 'id': r['id'], 'text': 'x'}, key=B)
+    check('another key cannot edit in my topic', code == 403 and e['error'] == 'not_holder')
+    code, e = call('/api/edit', 'POST', {'chat': t1['chat'], 'id': inc[0]['id'], 'text': 'x'})
+    check("the user's messages cannot be edited", code == 404 and e['error'] == 'unknown_message')
+    code, e = call('/api/edit', 'POST', {'chat': t1['chat'], 'id': 'abc', 'text': 'x'})
+    check('a bad id is a clear error, not a crash', code == 404 and e['error'] == 'unknown_message')
+    code, e = call('/api/react', 'POST', {'chat': t1['chat'], 'id': inc[0]['id'], 'emoji': '👀'})
+    check("the opener puts 👀 on the user's message", code == 200 and api.reacted[-1] == (GROUP, 1000 + user_uid, [{'type': 'emoji', 'emoji': '👀'}]), str(e))
+    code, e = call('/api/react', 'POST', {'chat': t1['chat'], 'id': r['id'], 'emoji': '👀'})
+    check('it cannot react to its own message', code == 404 and e['error'] == 'unknown_message')
+    code, e = call('/api/edit', 'POST', {'chat': 'tg:me', 'id': 1, 'text': 'x'})
+    check('edit only works in bot topics', code == 404 and e['error'] == 'unknown_chat')
 
     # ---------------- waiting
     t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={r['id']}&timeout=5")
@@ -357,8 +381,8 @@ tgsrc = open(os.path.join(HERE, '..', 'content', 'tg.py')).read(); botsrc = open
 said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('def create_bot'):tgsrc.index('def create_group')]))
 check('the only fixed texts ever sent to BotFather are /newbot and /cancel', said == {'/newbot', '/cancel'}, str(said))
 methods = set(re.findall(r"self\.call\([^,]+, '(\w+)'", botsrc)) | set(re.findall(r"_topic_call\('(\w+)'", botsrc))
-check('Bot API methods used: send, read, rename, create/edit/close/reopen topics; nothing that deletes',
-      methods == {'getMe', 'getChat', 'sendMessage', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
+check('Bot API methods used: send, edit own messages, react, read, rename, create/edit/close/reopen topics; nothing that deletes',
+      methods == {'getMe', 'getChat', 'sendMessage', 'editMessageText', 'setMessageReaction', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
 check('the group is made with manage_topics only', 'ChatAdminRights(manage_topics=True)' in tgsrc)
 
 print('ALL PASS' if ok else 'FAILURES')

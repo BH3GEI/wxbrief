@@ -213,7 +213,7 @@ def api(path, q, agent=False):
 TG_HTTP = {'rate_limited': 429, 'not_logged_in': 409, 'not_configured': 409, 'needs_approval': 403,
            'unknown_chat': 404, 'no_media': 404, 'not_available': 404, 'network': 502, 'timeout': 504,
            'telegram_error': 502, 'hidden': 403, 'not_holder': 403, 'not_ready': 409,
-           'botfather': 502}
+           'botfather': 502, 'unknown_message': 404}
 
 def tg_reply(handler, e):
     body = json.dumps(e.as_json(), ensure_ascii=False)
@@ -321,6 +321,8 @@ POST /api/bots   {purpose: 用途}（JSON）
     还没建好时返回 409 not_ready（请我去设置页点“建立”）。
 GET /api/bots    所有话题：status（open/closed）、holder、purpose、last_activity、mine（是不是你开的）。
 POST /api/send   {chat: "tgbot:话题号", text}  在你开的话题里发给我，立即发出，返回 {"status":"sent", id}。只有开这个话题的 key 能发。
+POST /api/edit   {chat: "tgbot:话题号", id, text}  改你在这个话题里发过的一条消息（id 是发送时返回的）。用来边写边显示：先发一条，再不停改它；改得太勤会被限流，隔一两秒改一次。
+POST /api/react  {chat: "tgbot:话题号", id, emoji}  给我发的一条消息加一个表情，例如 👀 表示看到了；emoji 为空就去掉。只能用 Telegram 允许的表情。
 GET /api/wait?chat=tgbot:话题号&after_id=<上面返回的 id>   等我回复：只返回我发的消息（sender 是“我”），你自己发的不算；加 &all=1 返回全部。
     等回复不要在前台阻塞：把它放进后台任务或监视器里循环（例如 Claude Code 的 Monitor，或后台运行的命令），有消息才会通知你，前台照常做别的事。
     不要在前台一次等几分钟。可以直接用这段后台循环（换成你的 key 和话题号；last 用发送时返回的 id）：
