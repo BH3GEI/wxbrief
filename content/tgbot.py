@@ -648,7 +648,8 @@ class Bots:
             fields['caption'] = text
         m = self.upload(d['bot']['token'], 'sendPhoto' if photo else 'sendDocument', fields, 'photo' if photo else 'document', name, data, self.proxy())
         f = (m.get('photo') or [{}])[-1] if photo else (m.get('document') or {})
-        res = f"bot:{'img' if photo else 'file'}:{f.get('file_id', '')}:{name.replace(':', '_')}"
+        kept = (os.path.splitext(name)[0] + '.jpg') if photo else name      # Telegram re-encodes photos as JPEG
+        res = f"bot:{'img' if photo else 'file'}:{f.get('file_id', '')}:{kept.replace(':', '_')}"
         mid = self._store(tid, m['message_id'], m.get('date') or int(self.now()), t['name'], (text + ' ' if text else '') + ('[图片]' if photo else f'[文件] {name}'), res)
         self.touch(chat)
         return {'status': 'sent', 'chat': chat, 'id': mid}
