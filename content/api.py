@@ -63,6 +63,9 @@ def media_json(r):
     if not res:
         return None
     kind = res.split(':', 1)[0]
+    if kind == 'bot':
+        return {'kind': MEDIA_KIND.get(res.split(':')[1]), 'url': f"/api/media/{r['id']}", 'thumb_url': None,
+                'name': (res.split(':', 3) + ['', '', '', ''])[3], 'available': 'full', 'status': 'ready'}
     if kind == 'tg':
         ready = ctx.TGS.media_ready(r['id'])
         return {'kind': MEDIA_KIND.get(res.split(':')[1]), 'url': f"/api/media/{r['id']}", 'thumb_url': None,
@@ -322,6 +325,8 @@ POST /api/bots   {purpose: 用途}（JSON）
 GET /api/bots    所有话题：status（open/closed）、holder、purpose、last_activity、mine（是不是你开的）。
 POST /api/send   {chat: "tgbot:话题号", text}  在你开的话题里发给我，立即发出，返回 {"status":"sent", id}。只有开这个话题的 key 能发。
     可加 buttons：按行的按钮，[[{"text": "Opus", "data": "/cc_model opus"}, ...], ...]（也可以直接写字符串）。我点了按钮，就等于我发了一条内容为 data 的消息（data 最多 64 字节）。
+POST /api/send_file  {chat: "tgbot:话题号", name: "图.png", data: "<base64>", text: "可选说明"}  在你的话题里发图片（直接显示）或任意文件给我，最大 20MB。
+    我在话题里发的图片和文件：消息里有 media.url，GET 它（带同样的 Authorization）就能下载原件。
 POST /api/edit   {chat: "tgbot:话题号", id, text}  改你在这个话题里发过的一条消息（id 是发送时返回的）。用来边写边显示：先发一条，再不停改它；改得太勤会被限流，隔一两秒改一次。也可以带 buttons。
 POST /api/react  {chat: "tgbot:话题号", id, emoji}  给我发的一条消息加一个表情，例如 👀 表示看到了；emoji 为空就去掉。只能用 Telegram 允许的表情。
 GET /api/wait?chat=tgbot:话题号&after_id=<上面返回的 id>   等我回复：只返回我发的消息（sender 是“我”），你自己发的不算；加 &all=1 返回全部。

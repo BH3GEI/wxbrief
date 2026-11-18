@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Talking to agents through one bot and a forum group, end to end through the HTTP server.
 Fake Telegram account, fake Bot API, scripted BotFather dialogue."""
-import json, os, re, shutil, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, json, os, re, shutil, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(dir=os.path.join(HERE, '..'))
@@ -47,6 +47,8 @@ class BotAPI:
             raise tg.TGError('telegram_error', 'Bad Request: message thread not found')
         if method == 'setMyCommands':
             self.menus.append(p); return True
+        if method == 'getFile':
+            return {'file_id': p['file_id'], 'file_size': 5, 'file_path': 'photos/x.jpg'}
         if method == 'answerCallbackQuery':
             self.answered.append(p['callback_query_id']); return True
         if method == 'sendMessage':
@@ -248,6 +250,24 @@ try:
     check("only the user's messages in known topics are kept", kept == 1 and [m['text'] for m in inc] == ['要，发我'] and inc[0]['sender'] == '我' and inc[0]['chat'] == t1['chat'])
     check('updates are not read twice', ctx.BOTS.poll_once() == 0)
 
+    # ---------------- pictures and files
+    ctx.BOTS.get_file = lambda token, path, proxy='', timeout=120: b'JPEG!'
+    uploads = []
+    ctx.BOTS.upload = lambda token, method, fields, field, name, data, proxy='', timeout=120: (uploads.append((method, field, name, data, fields.get('caption'))), {'message_id': 777, 'date': int(time.time()), 'photo': [{'file_id': 'AgSMALL'}, {'file_id': 'AgBIG'}]})[1]
+    api.push(fake.owner, None, thread=tid1, photo=[{'file_id': 'small'}, {'file_id': 'BIGPHOTO'}], caption='看这个')
+    ctx.BOTS.poll_once()
+    code, ph = call(f"/api/messages?chat={q(t1['chat'])}&limit=1")
+    check('a picture from the user is kept with a download link', ph[-1]['text'] == '看这个 [图片]' and ph[-1]['media']['kind'] == 'image' and ph[-1]['media']['url'] == f"/api/media/{ph[-1]['id']}")
+    raw = urllib.request.urlopen(urllib.request.Request(base + ph[-1]['media']['url'], headers={'Authorization': 'Bearer ' + A['key']})).read()
+    check('and the original comes down through the API (largest size)', raw == b'JPEG!' and ('getFile', {'file_id': 'BIGPHOTO'}) in api.calls)
+    code, sf = call('/api/send_file', 'POST', {'chat': t1['chat'], 'name': 'chart.png', 'data': base64.b64encode(b'PNGDATA').decode(), 'text': '图表'})
+    check('the agent sends a picture into its topic', code == 200 and uploads[-1] == ('sendPhoto', 'photo', 'chart.png', b'PNGDATA', '图表'))
+    code, sf2 = call('/api/send_file', 'POST', {'chat': t1['chat'], 'name': 'report.pdf', 'data': base64.b64encode(b'%PDF').decode()})
+    check('and any other file as a document', code == 200 and uploads[-1][:3] == ('sendDocument', 'document', 'report.pdf'))
+    check('bad base64 is refused', call('/api/send_file', 'POST', {'chat': t1['chat'], 'name': 'x', 'data': '***'})[0] == 400)
+    check('another key cannot send files into the topic', call('/api/send_file', 'POST', {'chat': t1['chat'], 'name': 'x.png', 'data': 'eA=='}, key=B)[0] == 403)
+    api.calls[:] = [c for c in api.calls if c[0] != 'getFile']
+
     # ---------------- buttons
     code, rb = call('/api/send', 'POST', {'chat': t1['chat'], 'text': '选模型', 'buttons': [[{'text': 'Opus', 'data': '/cc_model opus'}, 'sonnet']]})
     check('buttons go out as an inline keyboard', code == 200 and api.markups[-1] == {'inline_keyboard': [[{'text': 'Opus', 'callback_data': '/cc_model opus'}, {'text': 'sonnet', 'callback_data': 'sonnet'}]]})
@@ -283,7 +303,7 @@ try:
 
     # ---------------- waiting
     t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={r['id']}&timeout=5")
-    check('wait returns at once when something is there', [m['text'] for m in got] == ['要，发我', '/cc_model opus'] and time.time() - t0 < 2)
+    check('wait returns at once when something is there', [m['text'] for m in got] == ['要，发我', '看这个 [图片]', '/cc_model opus'] and time.time() - t0 < 2)
     top = got[-1]['id']
     t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={top}&timeout=1")
     check('wait times out with []', got == [] and 0.9 < time.time() - t0 < 4)
@@ -441,7 +461,7 @@ said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('d
 check('the only fixed texts ever sent to BotFather are /newbot and /cancel', said == {'/newbot', '/cancel'}, str(said))
 methods = set(re.findall(r"self\.call\([^,]+, '(\w+)'", botsrc)) | set(re.findall(r"_topic_call\('(\w+)'", botsrc))
 check('Bot API methods used: send, edit own messages, react, read, rename, create/edit/close/reopen topics; nothing that deletes',
-      methods == {'getMe', 'getChat', 'answerCallbackQuery', 'sendMessage', 'editMessageText', 'setMessageReaction', 'setMyCommands', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
+      methods == {'getMe', 'getChat', 'getFile', 'answerCallbackQuery', 'sendMessage', 'editMessageText', 'setMessageReaction', 'setMyCommands', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
 check('the group is made with manage_topics only', 'ChatAdminRights(manage_topics=True)' in tgsrc)
 
 print('ALL PASS' if ok else 'FAILURES')

@@ -12,7 +12,7 @@
 
 Topics are stored as chats `tgbot:<topic id>` in the same `msgs` table.
 """
-import http.client, json, os, re, secrets, socket, ssl, threading, time
+import base64, http.client, json, mimetypes, os, re, secrets, socket, ssl, threading, time, uuid
 
 from tg import TGError
 
@@ -63,6 +63,48 @@ def bot_call(token, method, params=None, proxy='', timeout=30):
     return d['result']
 
 
+def bot_get_file(token, path, proxy='', timeout=120):
+    """Download a file the Bot API points to (getFile → file_path)."""
+    conn = _Conn(proxy, timeout)
+    try:
+        conn.request('GET', f'/file/bot{token}/{path}')
+        r = conn.getresponse()
+        data = r.read()
+        if r.status != 200:
+            raise TGError('not_available', f'Telegram 没给文件（{r.status}）')
+        return data
+    except (OSError, socket.timeout) as e:
+        raise TGError('network', f'连不上 Telegram Bot API：{type(e).__name__}，请检查代理')
+    finally:
+        conn.close()
+
+
+def bot_upload(token, method, fields, field, name, data, proxy='', timeout=120):
+    """sendPhoto / sendDocument with the file in the request (multipart)."""
+    b = uuid.uuid4().hex
+    parts = []
+    for k, v in fields.items():
+        parts.append(f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n'.encode() + str(v).encode() + b'\r\n')
+    mime = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+    safe = name.replace('"', '')
+    parts.append(f'--{b}\r\nContent-Disposition: form-data; name="{field}"; filename="{safe}"\r\nContent-Type: {mime}\r\n\r\n'.encode() + data + b'\r\n')
+    body = b''.join(parts) + f'--{b}--\r\n'.encode()
+    conn = _Conn(proxy, timeout)
+    try:
+        conn.request('POST', f'/bot{token}/{method}', body, {'Content-Type': f'multipart/form-data; boundary={b}'})
+        d = json.loads(conn.getresponse().read() or b'{}')
+    except (OSError, socket.timeout, ValueError) as e:
+        raise TGError('network', f'连不上 Telegram Bot API：{type(e).__name__}，请检查代理')
+    finally:
+        conn.close()
+    if not d.get('ok'):
+        raise TGError('telegram_error', str(d.get('description') or d)[:200])
+    return d['result']
+
+
+MEDIA_MAX = 20 * 1024 * 1024      # the Bot API's limit for downloads; uploads use the same cap here
+
+
 class Bots:
     def __init__(self, var, db, log, tgs, key_name, proxy=lambda: '', call=bot_call, now=time.time, autolisten=True):
         """tgs: tg.Service. key_name(key_id) -> name, or None if the key is gone.
@@ -73,6 +115,8 @@ class Bots:
         self.listener = None
         self.wake = threading.Event()
         self.autolisten = autolisten
+        self.media_dir = var + '/tgbot_media'
+        self.get_file, self.upload = bot_get_file, bot_upload
 
     # ------------------------------------------------------------------ storage (the token never leaves this file)
     def _load(self):
@@ -546,16 +590,68 @@ class Bots:
         finally:
             c.close()
 
-    def _store(self, tid, local_id, ts, sender, text):
+    def _store(self, tid, local_id, ts, sender, text, res=None):
         c = self.db()
         try:
-            cur = c.execute('insert or ignore into msgs(chat, local_id, ts, type, sender, text, backfill) values(?,?,?,1,?,?,0)',
-                            (PREFIX + str(tid), local_id, ts, sender, text))
+            cur = c.execute('insert or ignore into msgs(chat, local_id, ts, type, sender, text, backfill, res) values(?,?,?,1,?,?,0,?)',
+                            (PREFIX + str(tid), local_id, ts, sender, text, res))
             c.execute('update chats set last_local=max(last_local, ?) where chat=?', (local_id, PREFIX + str(tid)))
             c.commit()
             return cur.lastrowid
         finally:
             c.close()
+
+    def media_file(self, msg_id):
+        """(path, mime, name) of a file the user sent in a topic (or the agent sent), downloaded on first request."""
+        c = self.db()
+        try:
+            r = c.execute('select res from msgs where id=?', (msg_id,)).fetchone()
+        finally:
+            c.close()
+        if not r or not (r['res'] or '').startswith('bot:'):
+            raise TGError('no_media', '这条消息没有文件')
+        _, _, file_id, name = (r['res'].split(':', 3) + ['', '', '', ''])[:4]
+        name = re.sub(r'[\\/\x00-\x1f]', '_', name) or 'file'
+        os.makedirs(self.media_dir, exist_ok=True)
+        path = os.path.join(self.media_dir, f'{msg_id}_{name}')
+        if not os.path.isfile(path):
+            d = self._load()
+            info = self.call(d['bot']['token'], 'getFile', {'file_id': file_id}, self.proxy())
+            if (info.get('file_size') or 0) > MEDIA_MAX or not info.get('file_path'):
+                raise TGError('not_available', '文件太大（Bot API 最多 20MB）')
+            data = self.get_file(d['bot']['token'], info['file_path'], self.proxy())
+            with open(path + '.part', 'wb') as fh:
+                fh.write(data)
+            os.replace(path + '.part', path)
+        return path, mimetypes.guess_type(path)[0] or 'application/octet-stream', name
+
+    def send_file(self, key, chat, name, data, text=''):
+        """Send a picture (shown inline) or any file into the key's own topic."""
+        t = self.get(chat)
+        if not t:
+            raise TGError('unknown_chat', '没有这个话题')
+        if t.get('holder') != key['id']:
+            raise TGError('not_holder', '这个话题不是你开的')
+        name = re.sub(r'[\\/\x00-\x1f]', '_', (name or '').strip()) or 'file'
+        if not data:
+            raise TGError('empty', '文件是空的')
+        if len(data) > MEDIA_MAX:
+            raise TGError('too_long', '文件最大 20MB')
+        text = (text or '').strip()[:1024]
+        tid = chat[len(PREFIX):]
+        if t.get('closed'):
+            self._reopen(tid)
+        d = self._load()
+        photo = (mimetypes.guess_type(name)[0] or '').startswith('image/') and not name.lower().endswith('.svg') and len(data) <= 10 * 1024 * 1024
+        fields = {'chat_id': d['group']['id'], 'message_thread_id': int(tid)}
+        if text:
+            fields['caption'] = text
+        m = self.upload(d['bot']['token'], 'sendPhoto' if photo else 'sendDocument', fields, 'photo' if photo else 'document', name, data, self.proxy())
+        f = (m.get('photo') or [{}])[-1] if photo else (m.get('document') or {})
+        res = f"bot:{'img' if photo else 'file'}:{f.get('file_id', '')}:{name.replace(':', '_')}"
+        mid = self._store(tid, m['message_id'], m.get('date') or int(self.now()), t['name'], (text + ' ' if text else '') + ('[图片]' if photo else f'[文件] {name}'), res)
+        self.touch(chat)
+        return {'status': 'sent', 'chat': chat, 'id': mid}
 
     def poll_once(self, timeout=50):
         """One getUpdates round: keep the user's messages in known topics of the group, drop everything else."""
@@ -604,9 +700,16 @@ class Bots:
             if kind and not m.get('text'):
                 text = (text + ' ' if text else '') + {'photo': '[图片]', 'voice': '[语音]', 'video': '[视频]',
                                                        'document': '[文件]', 'sticker': '[贴纸]'}[kind]
+            res = None
+            if kind:
+                f = m['photo'][-1] if kind == 'photo' else m[kind]
+                ext = {'photo': '.jpg', 'voice': '.ogg', 'video': '.mp4', 'sticker': '.webp'}.get(kind, '')
+                fname = f.get('file_name') or f"{kind}_{m['message_id']}{ext}"
+                short = {'photo': 'img', 'video': 'vid', 'voice': 'voice', 'sticker': 'img'}.get(kind, 'file')
+                res = f"bot:{short}:{f['file_id']}:{fname.replace(':', '_')}"
             if self._load()['topics'][tid].get('closed'):
                 self._reopen(tid)
-            self._store(tid, m['message_id'], m.get('date') or int(self.now()), '我', text)
+            self._store(tid, m['message_id'], m.get('date') or int(self.now()), '我', text, res)
             self.touch(PREFIX + tid)
             kept += 1
         with self.lock:

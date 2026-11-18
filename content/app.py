@@ -8,6 +8,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor'))
+import base64
 import runenv, ctx, wxdb, media, apikeys, keys as keymod, tg, tgbot
 from api import api, api_send, draft_create, draft_dismiss, draft_get, draft_list, help_text, tg_reply, wait_new
 from ctx import STATE, VAR, WECHAT, db, init_store, log
@@ -44,6 +45,12 @@ def make_handler(K):
                 return self.send('{"error":"no media"}', 404, 'application/json')
             if r['res'].startswith('voice:'):
                 how, data, mime, name = self.voice(r, mid)
+            elif r['res'].startswith('bot:'):
+                try:
+                    data, mime, name = ctx.BOTS.media_file(mid)
+                except tg.TGError as e:
+                    return self.send(json.dumps({'error': e.msg}, ensure_ascii=False), 404, 'application/json; charset=utf-8')
+                how = 'file'
             elif r['res'].startswith('tg:'):
                 data, mime, name = ctx.TGS.media_file(mid)      # downloads from Telegram on first request
                 how = 'file'
@@ -156,7 +163,7 @@ def make_handler(K):
                 if u.path == '/api/drafts':
                     if not ctx.APIKEYS.check(self.headers.get('Authorization', '')):
                         return self.send('{"error":"unauthorized"}', 401, 'application/json')
-                    n = min(int(self.headers.get('Content-Length') or 0), 64 * 1024)
+                    n = min(int(self.headers.get('Content-Length') or 0), 28 * 1024 * 1024 if u.path == '/api/send_file' else 64 * 1024)
                     try:
                         f = json.loads(self.rfile.read(n).decode('utf-8'))
                         if not isinstance(f, dict):
@@ -168,18 +175,26 @@ def make_handler(K):
                         return self.send('{"error":"chat and body required"}', 400, 'application/json')
                     return self.send(json.dumps(d, ensure_ascii=False), 201 if 'id' in d else 200,
                                      'application/json; charset=utf-8')
-                if u.path in ('/api/send', '/api/edit', '/api/react', '/api/bots', '/api/bots/release', '/api/bots/adopt', '/api/bots/commands'):
+                if u.path in ('/api/send', '/api/send_file', '/api/edit', '/api/react', '/api/bots', '/api/bots/release', '/api/bots/adopt', '/api/bots/commands'):
                     key = ctx.APIKEYS.check(self.headers.get('Authorization', ''))
                     if not key:
                         return self.send('{"error":"unauthorized"}', 401, 'application/json')
-                    n = min(int(self.headers.get('Content-Length') or 0), 64 * 1024)
+                    n = min(int(self.headers.get('Content-Length') or 0), 28 * 1024 * 1024 if u.path == '/api/send_file' else 64 * 1024)
                     try:
                         f = json.loads(self.rfile.read(n).decode('utf-8'))
                         if not isinstance(f, dict):
                             raise ValueError('JSON object required')
                     except Exception as e:
                         return self.send(json.dumps({'error': f'invalid json: {e}'}), 400, 'application/json')
-                    if u.path == '/api/send':
+                    if u.path == '/api/send_file':
+                        if not (ctx.BOTS and tgbot.is_bot(f.get('chat', ''))):
+                            raise tg.TGError('unknown_chat', '只能发到你用 POST /api/bots 开的话题里')
+                        try:
+                            raw = base64.b64decode(f.get('data') or '', validate=True)
+                        except Exception:
+                            raise tg.TGError('bad_file', 'data 要是 base64')
+                        res = ctx.BOTS.send_file(key, f.get('chat', ''), f.get('name', ''), raw, f.get('text', ''))
+                    elif u.path == '/api/send':
                         res = api_send(f.get('chat', ''), f.get('text', ''), f.get('note', ''), key, f.get('buttons'))
                     elif u.path in ('/api/edit', '/api/react'):
                         if not (ctx.BOTS and tgbot.is_bot(f.get('chat', ''))):
