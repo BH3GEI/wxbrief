@@ -425,7 +425,32 @@ class Bots:
         return {'status': 'set', 'count': len(clean)}
 
     # ------------------------------------------------------------------ talking
-    def send(self, key, chat, text):
+    @staticmethod
+    def _keyboard(buttons):
+        """buttons: rows of {text, data} (or plain strings, text = data). Pressing one comes back as the user's message `data`."""
+        if not buttons:
+            return None
+        if not isinstance(buttons, list) or not all(isinstance(r, list) for r in buttons):
+            raise TGError('bad_buttons', 'buttons 要写成按行的列表：[[{"text": "显示的字", "data": "按下后当作用户发的话"}], ...]')
+        rows = []
+        for r in buttons:
+            row = []
+            for b in r:
+                if isinstance(b, str):
+                    b = {'text': b, 'data': b}
+                text, data = str(b.get('text') or b.get('data') or '').strip(), str(b.get('data') or b.get('text') or '').strip()
+                if not text or not data:
+                    raise TGError('bad_buttons', '每个按钮要有 text 或 data')
+                if len(data.encode()) > 64:
+                    raise TGError('bad_buttons', f'按钮的 data 最多 64 字节：{data[:30]}')
+                row.append({'text': text, 'callback_data': data})
+            if row:
+                rows.append(row)
+        if len(rows) > 50:
+            raise TGError('bad_buttons', '按钮太多')
+        return {'inline_keyboard': rows} if rows else None
+
+    def send(self, key, chat, text, buttons=None):
         t = self.get(chat)
         if not t:
             raise TGError('unknown_chat', '没有这个话题。先 GET /api/bots 看有哪些，或用 POST /api/bots 开一个。')
@@ -441,8 +466,11 @@ class Bots:
             self._reopen(tid)
         d = self._load()
         try:
-            m = self.call(d['bot']['token'], 'sendMessage', {'chat_id': d['group']['id'], 'message_thread_id': int(tid), 'text': text},
-                          self.proxy())
+            p = {'chat_id': d['group']['id'], 'message_thread_id': int(tid), 'text': text}
+            kb = self._keyboard(buttons)
+            if kb:
+                p['reply_markup'] = kb
+            m = self.call(d['bot']['token'], 'sendMessage', p, self.proxy())
         except TGError as e:
             if 'THREAD NOT FOUND' in e.msg.upper().replace('_', ' '):
                 self._mark_deleted(tid)
@@ -472,7 +500,7 @@ class Bots:
             raise TGError('unknown_message', '这个话题里没有这条消息' + ('（只能给我发的消息加表情）' if user else '（只能改你自己发的消息）'))
         return chat[len(PREFIX):], row[0]
 
-    def edit(self, key, chat, mid, text):
+    def edit(self, key, chat, mid, text, buttons=None):
         """Replace the text of a message the bot sent (for streaming a reply as it is written)."""
         tid, local = self._target(key, chat, mid, user=False)
         text = (text or '').strip()
@@ -482,7 +510,11 @@ class Bots:
             raise TGError('too_long', 'Telegram 单条消息最多 4096 字')
         d = self._load()
         try:
-            self.call(d['bot']['token'], 'editMessageText', {'chat_id': d['group']['id'], 'message_id': local, 'text': text}, self.proxy())
+            p = {'chat_id': d['group']['id'], 'message_id': local, 'text': text}
+            kb = self._keyboard(buttons)
+            if kb:
+                p['reply_markup'] = kb
+            self.call(d['bot']['token'], 'editMessageText', p, self.proxy())
         except TGError as e:
             if 'NOT MODIFIED' not in e.msg.upper().replace('_', ' '):
                 raise
@@ -531,11 +563,27 @@ class Bots:
         if not d.get('bot'):
             return 0
         b, g = d['bot'], d.get('group') or {}
-        ups = self.call(b['token'], 'getUpdates', {'offset': d['offset'], 'timeout': timeout, 'allowed_updates': ['message']},
+        ups = self.call(b['token'], 'getUpdates', {'offset': d['offset'], 'timeout': timeout, 'allowed_updates': ['message', 'callback_query']},
                         self.proxy(), timeout + 15)
         kept, offset = 0, d['offset']
         for up in ups:
             offset = max(offset, up['update_id'] + 1)
+            q = up.get('callback_query')
+            if q:                                                 # a button pressed: it counts as the user saying its data
+                qm = q.get('message') or {}
+                qtid = str(qm.get('message_thread_id') or '')
+                try:
+                    self.call(b['token'], 'answerCallbackQuery', {'callback_query_id': q['id']}, self.proxy())
+                except TGError:
+                    pass
+                if ((q.get('from') or {}).get('id') == b['owner'] and (qm.get('chat') or {}).get('id') == g.get('id')
+                        and qtid in d['topics'] and q.get('data')):
+                    if self._load()['topics'][qtid].get('closed'):
+                        self._reopen(qtid)
+                    self._store(qtid, -up['update_id'], int(self.now()), '我', q['data'])
+                    self.touch(PREFIX + qtid)
+                    kept += 1
+                continue
             m = up.get('message') or {}
             tid = str(m.get('message_thread_id') or '')
             if m and (m.get('from') or {}).get('id') == b['owner'] and (m.get('chat') or {}).get('id') == g.get('id') and tid:

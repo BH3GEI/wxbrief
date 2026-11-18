@@ -24,6 +24,7 @@ class BotAPI:
     """Fake Bot API: update queue, sent messages, topics."""
     def __init__(self):
         self.updates, self.sent, self.calls, self.uid, self.next_topic, self.topics = [], [], [], 0, 100, {}
+        self.markups, self.answered = [], []
         self.dead, self.offline, self.gone_chats = set(), set(), set()
         self.edited, self.reacted, self.menus, self.deleted_threads = [], [], [], set()
     def push(self, from_id, text, chat_id=GROUP, thread=None, topic=True, **extra):
@@ -46,7 +47,10 @@ class BotAPI:
             raise tg.TGError('telegram_error', 'Bad Request: message thread not found')
         if method == 'setMyCommands':
             self.menus.append(p); return True
+        if method == 'answerCallbackQuery':
+            self.answered.append(p['callback_query_id']); return True
         if method == 'sendMessage':
+            self.markups.append(p.get('reply_markup'))
             self.sent.append((p['chat_id'], p.get('message_thread_id'), p['text']))
             return {'message_id': 500 + len(self.sent), 'date': int(time.time())}
         if method == 'editMessageText':
@@ -244,6 +248,21 @@ try:
     check("only the user's messages in known topics are kept", kept == 1 and [m['text'] for m in inc] == ['要，发我'] and inc[0]['sender'] == '我' and inc[0]['chat'] == t1['chat'])
     check('updates are not read twice', ctx.BOTS.poll_once() == 0)
 
+    # ---------------- buttons
+    code, rb = call('/api/send', 'POST', {'chat': t1['chat'], 'text': '选模型', 'buttons': [[{'text': 'Opus', 'data': '/cc_model opus'}, 'sonnet']]})
+    check('buttons go out as an inline keyboard', code == 200 and api.markups[-1] == {'inline_keyboard': [[{'text': 'Opus', 'callback_data': '/cc_model opus'}, {'text': 'sonnet', 'callback_data': 'sonnet'}]]})
+    check('a button whose data is too long is refused', call('/api/send', 'POST', {'chat': t1['chat'], 'text': 'x', 'buttons': [['a' * 65]]})[0] == 400)
+    api.uid += 1
+    api.updates.append({'update_id': api.uid, 'callback_query': {'id': 'cb1', 'from': {'id': fake.owner}, 'data': '/cc_model opus',
+                        'message': {'message_id': 900, 'message_thread_id': tid1, 'chat': {'id': GROUP}}}})
+    api.uid += 1
+    api.updates.append({'update_id': api.uid, 'callback_query': {'id': 'cb2', 'from': {'id': 999}, 'data': '陌生人点的',
+                        'message': {'message_id': 900, 'message_thread_id': tid1, 'chat': {'id': GROUP}}}})
+    ctx.BOTS.poll_once()
+    code, pressed = call(f"/api/messages?after_id={rb['id']}")
+    check("pressing a button = the user saying its data; others' presses are dropped and every press is answered",
+          [m['text'] for m in pressed] == ['/cc_model opus'] and pressed[0]['sender'] == '我' and api.answered == ['cb1', 'cb2'])
+
     # ---------------- editing my own message (streaming) and reacting to the user's (seen)
     code, e = call('/api/edit', 'POST', {'chat': t1['chat'], 'id': r['id'], 'text': '日报写好了，要看吗？（改）'})
     check('the opener edits its own message in place', code == 200 and e['status'] == 'edited' and api.edited[-1] == (GROUP, api_mid, '日报写好了，要看吗？（改）'), str(e))
@@ -264,7 +283,7 @@ try:
 
     # ---------------- waiting
     t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={r['id']}&timeout=5")
-    check('wait returns at once when something is there', [m['text'] for m in got] == ['要，发我'] and time.time() - t0 < 2)
+    check('wait returns at once when something is there', [m['text'] for m in got] == ['要，发我', '/cc_model opus'] and time.time() - t0 < 2)
     top = got[-1]['id']
     t0 = time.time(); code, got = call(f"/api/wait?chat={q(t1['chat'])}&after_id={top}&timeout=1")
     check('wait times out with []', got == [] and 0.9 < time.time() - t0 < 4)
@@ -422,7 +441,7 @@ said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('d
 check('the only fixed texts ever sent to BotFather are /newbot and /cancel', said == {'/newbot', '/cancel'}, str(said))
 methods = set(re.findall(r"self\.call\([^,]+, '(\w+)'", botsrc)) | set(re.findall(r"_topic_call\('(\w+)'", botsrc))
 check('Bot API methods used: send, edit own messages, react, read, rename, create/edit/close/reopen topics; nothing that deletes',
-      methods == {'getMe', 'getChat', 'sendMessage', 'editMessageText', 'setMessageReaction', 'setMyCommands', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
+      methods == {'getMe', 'getChat', 'answerCallbackQuery', 'sendMessage', 'editMessageText', 'setMessageReaction', 'setMyCommands', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
 check('the group is made with manage_topics only', 'ChatAdminRights(manage_topics=True)' in tgsrc)
 
 print('ALL PASS' if ok else 'FAILURES')

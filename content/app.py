@@ -180,12 +180,12 @@ def make_handler(K):
                     except Exception as e:
                         return self.send(json.dumps({'error': f'invalid json: {e}'}), 400, 'application/json')
                     if u.path == '/api/send':
-                        res = api_send(f.get('chat', ''), f.get('text', ''), f.get('note', ''), key)
+                        res = api_send(f.get('chat', ''), f.get('text', ''), f.get('note', ''), key, f.get('buttons'))
                     elif u.path in ('/api/edit', '/api/react'):
                         if not (ctx.BOTS and tgbot.is_bot(f.get('chat', ''))):
                             raise tg.TGError('unknown_chat', '只能在你用 POST /api/bots 开的话题里用')
                         if u.path == '/api/edit':
-                            res = ctx.BOTS.edit(key, f.get('chat', ''), f.get('id'), f.get('text', ''))
+                            res = ctx.BOTS.edit(key, f.get('chat', ''), f.get('id'), f.get('text', ''), f.get('buttons'))
                         else:
                             res = ctx.BOTS.react(key, f.get('chat', ''), f.get('id'), f.get('emoji', '👀'))
                     elif u.path == '/api/bots/adopt':

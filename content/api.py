@@ -321,7 +321,8 @@ POST /api/bots   {purpose: 用途}（JSON）
     还没建好时返回 409 not_ready（请我去设置页点“建立”）。
 GET /api/bots    所有话题：status（open/closed）、holder、purpose、last_activity、mine（是不是你开的）。
 POST /api/send   {chat: "tgbot:话题号", text}  在你开的话题里发给我，立即发出，返回 {"status":"sent", id}。只有开这个话题的 key 能发。
-POST /api/edit   {chat: "tgbot:话题号", id, text}  改你在这个话题里发过的一条消息（id 是发送时返回的）。用来边写边显示：先发一条，再不停改它；改得太勤会被限流，隔一两秒改一次。
+    可加 buttons：按行的按钮，[[{"text": "Opus", "data": "/cc_model opus"}, ...], ...]（也可以直接写字符串）。我点了按钮，就等于我发了一条内容为 data 的消息（data 最多 64 字节）。
+POST /api/edit   {chat: "tgbot:话题号", id, text}  改你在这个话题里发过的一条消息（id 是发送时返回的）。用来边写边显示：先发一条，再不停改它；改得太勤会被限流，隔一两秒改一次。也可以带 buttons。
 POST /api/react  {chat: "tgbot:话题号", id, emoji}  给我发的一条消息加一个表情，例如 👀 表示看到了；emoji 为空就去掉。只能用 Telegram 允许的表情。
 GET /api/wait?chat=tgbot:话题号&after_id=<上面返回的 id>   等我回复：只返回我发的消息（sender 是“我”），你自己发的不算；加 &all=1 返回全部。
     等回复不要在前台阻塞：把它放进后台任务或监视器里循环（例如 Claude Code 的 Monitor，或后台运行的命令），有消息才会通知你，前台照常做别的事。
@@ -376,7 +377,7 @@ def wait_new(q, key):
             return got
         time.sleep(0.5)
 
-def api_send(chat, text, note='', key=None):
+def api_send(chat, text, note='', key=None, buttons=None):
     """One entry point for agents. Saved Messages and the agent's own bots are sent at once; any other Telegram
     chat becomes a draft that the user approves on the page. WeChat is read-only."""
     chat = (chat or '').strip()
@@ -385,7 +386,7 @@ def api_send(chat, text, note='', key=None):
     if tgbot.is_bot(chat):
         if not ctx.BOTS:
             raise tg.TGError('unknown_chat', '没有这个 bot')
-        return ctx.BOTS.send(key, chat, text)
+        return ctx.BOTS.send(key, chat, text, buttons)
     if chat == BOTFATHER:
         raise tg.TGError('hidden', '这个会话不对 agent 开放')
     if not tg.is_tg(chat):
