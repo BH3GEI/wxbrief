@@ -42,4 +42,5 @@ assert for_rich('看 README.md 和 `a.md`，[x](https://h/a.md)，https://h/b.md
 assert for_rich('```\nREADME.md\n```\n| a.md | 1 |') == '```\nREADME.md\n```\n| `a.md` | 1 |'
 c = chunks('甲' * 3000 + '\n\n' + '乙' * 3000)
 assert c == ['甲' * 3000, '乙' * 3000], [len(x) for x in c]
+check('答\n\n<footer>⚙️ exterior · a &lt;b&gt;<br>c</footer>', '答\n\n⚙️ exterior · a <b>\nc', [('italic', '⚙️ exterior · a <b>\nc')])
 print('tgmd ok')

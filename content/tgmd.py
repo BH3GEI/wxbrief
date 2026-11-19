@@ -20,6 +20,7 @@ _PUNCT = set('\\`*_{}[]()#+-.!~>|$')
 # them into links to unrelated sites, so they are shown as code, which Telegram never links
 _FILE = re.compile(r'[\w./~-]*\w\.(?:md|sh|py|rs|pl|cc|ps|so|im)(?![\w.])')
 TABLE_MAX = 34      # display columns that fit a phone screen in Telegram's monospace font
+_FOOTER = re.compile(r'^\s*<footer>(.*)</footer>\s*$')
 _ROW = re.compile(r'^\s*\|(.+)\|\s*$')
 _RULE = re.compile(r'^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$')
 # $…$ as pandoc reads it: no space inside the dollars, no digit right after the closing one (so "$5 and $10" stays)
@@ -240,8 +241,12 @@ def render(md):
                 o.ent('pre', st, **({'language': f.group(1)} if f.group(1) else {}))
                 i = end + 1
                 continue
+        ft = _FOOTER.match(line)
         h = _HEAD.match(line)
-        if h:
+        if ft:      # a notice in a rich-message footer (exterior's own): italic here
+            import html
+            st = o.n; o.put(html.unescape(ft.group(1).replace('<br>', '\n'))); o.ent('italic', st)
+        elif h:
             st = o.n; _inline(h.group(1), o); o.ent('bold', st)
         elif q:
             if quote_start is None:
