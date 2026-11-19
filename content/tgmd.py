@@ -19,6 +19,7 @@ _PUNCT = set('\\`*_{}[]()#+-.!~>|$')
 # file names whose extension is also a country domain (README.md, run.sh, x.py, main.rs…): Telegram would turn
 # them into links to unrelated sites, so they are shown as code, which Telegram never links
 _FILE = re.compile(r'[\w./~-]*\w\.(?:md|sh|py|rs|pl|cc|ps|so|im)(?![\w.])')
+TABLE_MAX = 34      # display columns that fit a phone screen in Telegram's monospace font
 _ROW = re.compile(r'^\s*\|(.+)\|\s*$')
 _RULE = re.compile(r'^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$')
 # $…$ as pandoc reads it: no space inside the dollars, no digit right after the closing one (so "$5 and $10" stays)
@@ -100,8 +101,28 @@ def _cells(line):
     return [c.strip() for c in _ROW.match(line).group(1).split('|')]
 
 
+def _width(t):
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 0 if unicodedata.combining(c) else 1 for c in t)
+
+
+def _plain(t):
+    """Cell text without markup: inside a code block it would show literally."""
+    t = re.sub(r'\*\*(.+?)\*\*|~~(.+?)~~|`([^`]+)`', lambda m: next(g for g in m.groups() if g is not None), t)
+    return _LINK.sub(lambda m: m.group(1), t)
+
+
 def _table(rows):
-    """Header + rows → one bullet line per row (Telegram has no tables)."""
+    """Header + rows. Telegram has no tables: a table narrow enough for a phone becomes an aligned monospace block,
+    a wider one one bullet per row (a wrapped monospace block is unreadable)."""
+    n = max(len(r) for r in rows)
+    grid = [[_plain(c) for c in r] + [''] * (n - len(r)) for r in rows]
+    widths = [max(_width(r[k]) for r in grid) for k in range(n)]
+    if sum(widths) + 2 * (n - 1) <= TABLE_MAX:
+        pad = lambda t, w: t + ' ' * (w - _width(t))
+        fmt = lambda r: '  '.join(pad(c, w) for c, w in zip(r, widths)).rstrip()
+        rule = '  '.join('-' * w for w in widths)
+        return ['```', fmt(grid[0]), rule] + [fmt(r) for r in grid[1:]] + ['```']
     head, body = rows[0], rows[1:]
     lines = []
     for r in body:
