@@ -432,7 +432,11 @@ class Live:
             from telethon.tl import functions
             c = await self._client()
             peer = await self._channel(c, channel_id)
-            await c(functions.messages.UpdatePinnedForumTopicRequest(peer=peer, topic_id=topic_id, pinned=True))
+            try:
+                await c(functions.messages.UpdatePinnedForumTopicRequest(peer=peer, topic_id=topic_id, pinned=True))
+            except Exception as e:
+                if 'PINNED_TOPIC_NOT_MODIFIED' not in str(e):     # already pinned is what we want
+                    raise
             return True
         return self._run(go(), 30, login=True)
 
