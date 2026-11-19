@@ -392,6 +392,12 @@ try:
           and [c['command'] for c in api.menus[-1]['commands']] == ['cc_cost', 'pi_compact'], str(e))
     code, e = call('/api/bots/commands', 'POST', {'commands': [{'command': 'deep-research', 'description': 'x'}]})
     check('bad command names are refused', code == 400 and e['error'] == 'bad_commands')
+    big = [{'command': f'c{i:03d}', 'description': '中文说明' * 60} for i in range(100)]   # \uXXXX escapes: ~150 KB of JSON
+    code, e = call('/api/bots/commands', 'POST', {'commands': big})
+    check('a JSON body over 64 KB is read whole (100 commands, Chinese descriptions)', code == 200 and e['count'] == 100
+          and len(json.dumps({'commands': big})) > 64 * 1024 and api.menus[-1]['commands'][-1]['command'] == 'c099', str(e)[:200])
+    code, e = call('/api/bots/commands', 'POST', {'commands': [], 'pad': 'x' * (app.JSON_MAX + 1)})
+    check('a JSON body over the limit is refused with 413, not truncated', code == 413 and 'too large' in e['error'], str(e)[:200])
     code, _r = call('/api/send', 'POST', {'chat': 'tgbot:302', 'text': '| a | b |\n|---|---|\n| 1 | 2 |'})
     check('text goes out as a rich message (Telegram lays out tables and formulas)', code == 200 and api.calls[-1][0] == 'sendRichMessage'
           and api.calls[-1][1]['rich_message'] == {'markdown': '| a | b |\n|---|---|\n| 1 | 2 |'})

@@ -16,6 +16,18 @@ from pages import base_url, chat, do_refresh, home, keys_page, older_page, page,
 from wechat import VOICES, account_dir, ingest_loop
 
 
+# Request body limits. Bodies are always read whole; anything bigger is refused with 413, never cut short.
+SEND_FILE_MAX = 28 * 1024 * 1024    # POST /api/send_file: base64 of a file up to ~20 MB
+JSON_MAX = 4 * 1024 * 1024          # other JSON endpoints (100 menu commands or a 32768-char message as \uXXXX fit easily)
+FORM_MAX = 1024 * 1024              # web page forms (/tg/send text etc.)
+DRAIN_MAX = 64 * 1024 * 1024        # oversized bodies up to this are drained before answering 413
+
+
+class BodyError(Exception):
+    def __init__(self, code, msg):
+        super().__init__(msg); self.code = code
+
+
 def make_handler(K):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -24,6 +36,43 @@ def make_handler(K):
             b = body.encode()
             self.send_response(code); self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        def body(self, limit):
+            """The whole request body, exactly Content-Length bytes. Too big or cut short raises BodyError; never truncates."""
+            if 'chunked' in (self.headers.get('Transfer-Encoding') or '').lower():
+                self.close_connection = True
+                raise BodyError(411, 'Content-Length required (chunked bodies are not supported)')
+            try:
+                n = int(self.headers.get('Content-Length') or 0)
+            except ValueError:
+                n = -1
+            if n < 0:
+                self.close_connection = True
+                raise BodyError(400, 'bad Content-Length')
+            if n > limit:
+                self.close_connection = True
+                left = n if n <= DRAIN_MAX else 0   # read and drop it so the client gets the 413 instead of a broken pipe
+                while left > 0:
+                    got = self.rfile.read(min(left, 1 << 16))
+                    if not got:
+                        break
+                    left -= len(got)
+                raise BodyError(413, f'body too large: {n} bytes, the limit for {urlparse(self.path).path} is {limit} bytes')
+            data = self.rfile.read(n)           # buffered: loops until n bytes or EOF
+            if len(data) < n:
+                self.close_connection = True
+                raise BodyError(400, f'body cut short: got {len(data)} of {n} bytes')
+            return data
+        def json_body(self, path):
+            """(dict, None) or (None, error already sent)."""
+            try:
+                f = json.loads(self.body(SEND_FILE_MAX if path == '/api/send_file' else JSON_MAX).decode('utf-8'))
+                if not isinstance(f, dict):
+                    raise ValueError('JSON object required')
+                return f, None
+            except BodyError as e:
+                return None, self.send(json.dumps({'error': str(e)}), e.code, 'application/json')
+            except Exception as e:
+                return None, self.send(json.dumps({'error': f'invalid json: {e}'}), 400, 'application/json')
         def sec_headers(self):
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Content-Security-Policy', 'sandbox')
@@ -163,13 +212,9 @@ def make_handler(K):
                 if u.path == '/api/drafts':
                     if not ctx.APIKEYS.check(self.headers.get('Authorization', '')):
                         return self.send('{"error":"unauthorized"}', 401, 'application/json')
-                    n = min(int(self.headers.get('Content-Length') or 0), 28 * 1024 * 1024 if u.path == '/api/send_file' else 64 * 1024)
-                    try:
-                        f = json.loads(self.rfile.read(n).decode('utf-8'))
-                        if not isinstance(f, dict):
-                            raise ValueError('JSON object required')
-                    except Exception as e:
-                        return self.send(json.dumps({'error': f'invalid json: {e}'}), 400, 'application/json')
+                    f, err = self.json_body(u.path)
+                    if f is None:
+                        return err
                     d = draft_create(f.get('chat', ''), f.get('body', ''), f.get('note', ''))
                     if d is None:
                         return self.send('{"error":"chat and body required"}', 400, 'application/json')
@@ -179,13 +224,9 @@ def make_handler(K):
                     key = ctx.APIKEYS.check(self.headers.get('Authorization', ''))
                     if not key:
                         return self.send('{"error":"unauthorized"}', 401, 'application/json')
-                    n = min(int(self.headers.get('Content-Length') or 0), 28 * 1024 * 1024 if u.path == '/api/send_file' else 64 * 1024)
-                    try:
-                        f = json.loads(self.rfile.read(n).decode('utf-8'))
-                        if not isinstance(f, dict):
-                            raise ValueError('JSON object required')
-                    except Exception as e:
-                        return self.send(json.dumps({'error': f'invalid json: {e}'}), 400, 'application/json')
+                    f, err = self.json_body(u.path)
+                    if f is None:
+                        return err
                     if u.path == '/api/send_file':
                         if not (ctx.BOTS and tgbot.is_bot(f.get('chat', ''))):
                             raise tg.TGError('unknown_chat', '只能发到你用 POST /api/bots 开的话题里')
@@ -225,8 +266,10 @@ def make_handler(K):
                 if origin and origin != 'null' and urlparse(origin).netloc != urlparse(base_url(self)).netloc:
                     log('apikey: rejected POST from', origin[:80])
                     return self.send(page('出错了', '<p>请求来源不对，请从本页面操作。</p><p><a class="file" href="/keys">← 回到 key 管理</a></p>'), 403)
-                n = min(int(self.headers.get('Content-Length') or 0), 16384)
-                f = parse_qs(self.rfile.read(n).decode('utf-8', 'replace'))
+                try:
+                    f = parse_qs(self.body(FORM_MAX).decode('utf-8', 'replace'))
+                except BodyError as e:
+                    return self.send(page('出错了', f'<p>{html.escape(str(e))}</p>'), e.code)
                 if u.path == '/bots/config':
                     ctx.BOTS.set_config(idle_hours=int(f.get('idle_hours', ['72'])[0] or 72))
                     log('bots: settings saved')

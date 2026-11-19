@@ -226,6 +226,13 @@ def main():
         assert not any(x['id'] == d['id'] for x in get('/api/drafts')), 'draft not dismissed'
         assert '在的，稍等我看一下' not in urllib.request.urlopen(base + '/').read().decode()
         print('drafts OK (create/dedupe/pin/dismiss)')
+        big = json.dumps({'chat': chat, 'note': '长' * 30000, 'body': '大请求体的最后一个字段'}).encode()   # \uXXXX escapes: ~180 KB
+        assert len(big) > 64 * 1024
+        d = json.load(urllib.request.urlopen(urllib.request.Request(base + '/api/drafts', data=big, method='POST',
+                                                                    headers={**H, 'Content-Type': 'application/json'})))
+        assert d.get('id') and d['body'] == '大请求体的最后一个字段', f'JSON body over 64 KB not read whole: {d}'
+        urllib.request.urlopen(urllib.request.Request(base + f"/api/drafts/{d['id']}", method='DELETE', headers=H))
+        print('JSON body over 64 KB OK')
         try:
             urllib.request.urlopen(urllib.request.Request(base + '/api/drafts', data=payload, method='POST',
                                                           headers={'Content-Type': 'application/json'}))
