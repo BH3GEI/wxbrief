@@ -28,10 +28,12 @@ check('😀 **粗**', '😀 粗', [('bold', '粗')])            # UTF-16 offsets
 check('未闭合 **粗 和 `码', '未闭合 **粗 和 `码', [])        # broken markup stays as written
 check('---\n| a | b |', '---\n| a | b |', [])
 check('\\*不是斜体\\*', '*不是斜体*', [])
-check('| 文件 | 行数 | 内容 |\n|---|---|---|\n| a.md | 242 | 红线 |', '• a.md — 行数：242；内容：红线', [('bold', 'a.md')])
+check('| 文件 | 行数 | 内容 |\n|---|---|---|\n| a.md | 242 | 红线 |', '• a.md：行数 242；内容 红线', [('code', 'a.md'), ('bold', 'a.md')])
 check('| 名 | 值 |\n|:--|--:|\n| a | 1 |', '• a：1', [('bold', 'a')])
 check('价格 $5 和 $10', '价格 $5 和 $10', [])               # dollars are not math
 check('公式 $E=mc^2$', '公式 E=mc²', [('code', 'E=mc²')])
 check('$$\n\\frac{1}{1+e^{-x}} \\le \\sqrt{2}\n$$', '1/(1+e⁻ˣ) ≤ √2', [('pre', '1/(1+e⁻ˣ) ≤ √2')])
 check('```\n| a | b |\n|---|---|\n```', '| a | b |\n|---|---|', [('pre', '| a | b |\n|---|---|')])   # untouched in code
+check('看 README.md 和 knowledge/ops.md。', '看 README.md 和 knowledge/ops.md。', [('code', 'README.md'), ('code', 'knowledge/ops.md')])
+check('见 https://x.com/a/README.md 与 foo.mdx', '见 https://x.com/a/README.md 与 foo.mdx', [])   # URLs and other names untouched
 print('tgmd ok')

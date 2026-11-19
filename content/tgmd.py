@@ -16,6 +16,9 @@ _HEAD = re.compile(r'^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$')
 _QUOTE = re.compile(r'^\s{0,3}>\s?(.*)$')
 _BULLET = re.compile(r'^(\s*)[-*+]\s+(.*)$')
 _PUNCT = set('\\`*_{}[]()#+-.!~>|$')
+# file names whose extension is also a country domain (README.md, run.sh, x.py, main.rs…): Telegram would turn
+# them into links to unrelated sites, so they are shown as code, which Telegram never links
+_FILE = re.compile(r'[\w./~-]*\w\.(?:md|sh|py|rs|pl|cc|ps|so|im)(?![\w.])')
 _ROW = re.compile(r'^\s*\|(.+)\|\s*$')
 _RULE = re.compile(r'^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$')
 # $…$ as pandoc reads it: no space inside the dollars, no digit right after the closing one (so "$5 and $10" stays)
@@ -106,8 +109,8 @@ def _table(rows):
         if len(head) == 2:
             lines.append(f'- **{r[0]}**：{r[1]}')
         else:
-            rest = '；'.join(f'{h}：{v}' if h else v for h, v in zip(head[1:], r[1:]) if v)
-            lines.append(f'- **{r[0]}**' + (f' — {rest}' if rest else ''))
+            rest = '；'.join(f'{h} {v}' if h else v for h, v in zip(head[1:], r[1:]) if v)
+            lines.append(f'- **{r[0]}**' + (f'：{rest}' if rest else ''))
     return lines or ['- ' + ' | '.join(head)]
 
 
@@ -153,6 +156,10 @@ def _inline(s, o):
             j = s.find(mark, i + 2)
             if j > i + 2:
                 flush(); st = o.n; _inline(s[i + 2:j], o); o.ent('bold' if mark == '**' else 'strikethrough', st); i = j + 2; continue
+        if (c.isalnum() or c in '_./~') and (i == 0 or not (s[i - 1].isalnum() or s[i - 1] in '_./~-:')):
+            m = _FILE.match(s, i)
+            if m and '://' not in s[s.rfind(' ', 0, i) + 1:m.end()]:
+                flush(); st = o.n; o.put(m.group(0)); o.ent('code', st); i = m.end(); continue
         if c == '$':
             m = _MATH.match(s, i)
             if m:
