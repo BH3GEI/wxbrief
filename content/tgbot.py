@@ -15,6 +15,7 @@ Topics are stored as chats `tgbot:<topic id>` in the same `msgs` table.
 import base64, http.client, json, mimetypes, os, re, secrets, socket, ssl, threading, time, uuid
 
 from tg import TGError
+import tgmd
 
 PREFIX = 'tgbot:'
 API_HOST = 'api.telegram.org'
@@ -530,7 +531,10 @@ class Bots:
             self._reopen(tid)
         d = self._load()
         try:
-            p = {'chat_id': d['group']['id'], 'message_thread_id': int(tid), 'text': text}
+            shown, ents = tgmd.render(text)
+            p = {'chat_id': d['group']['id'], 'message_thread_id': int(tid), 'text': shown or text}
+            if ents:
+                p['entities'] = ents
             kb = self._keyboard(buttons)
             if kb:
                 p['reply_markup'] = kb
@@ -574,7 +578,10 @@ class Bots:
             raise TGError('too_long', 'Telegram 单条消息最多 4096 字')
         d = self._load()
         try:
-            p = {'chat_id': d['group']['id'], 'message_id': local, 'text': text}
+            shown, ents = tgmd.render(text)
+            p = {'chat_id': d['group']['id'], 'message_id': local, 'text': shown or text}
+            if ents:
+                p['entities'] = ents
             kb = self._keyboard(buttons)
             if kb:
                 p['reply_markup'] = kb
@@ -665,7 +672,10 @@ class Bots:
         photo = (mimetypes.guess_type(name)[0] or '').startswith('image/') and not name.lower().endswith('.svg') and len(data) <= 10 * 1024 * 1024
         fields = {'chat_id': d['group']['id'], 'message_thread_id': int(tid)}
         if text:
-            fields['caption'] = text
+            shown, ents = tgmd.render(text)
+            fields['caption'] = shown or text
+            if ents:
+                fields['caption_entities'] = json.dumps(ents, ensure_ascii=False)
         m = self.upload(d['bot']['token'], 'sendPhoto' if photo else 'sendDocument', fields, 'photo' if photo else 'document', name, data, self.proxy())
         f = (m.get('photo') or [{}])[-1] if photo else (m.get('document') or {})
         kept = (os.path.splitext(name)[0] + '.jpg') if photo else name      # Telegram re-encodes photos as JPEG

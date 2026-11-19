@@ -21,6 +21,8 @@ jobs:
         run: python tests/synthtest.py
       - name: unit test (zstd fallbacks, key derive, image key scan)
         run: python tests/unit_test.py
+      - name: tgmd
+        run: python tests/tgmd_test.py
       - name: memory scan test
         if: runner.os != 'macOS'
         run: python tests/memscan_test.py
