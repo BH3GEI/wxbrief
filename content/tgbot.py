@@ -416,6 +416,26 @@ class Bots:
         self.log('bots: adopter is now', key['name'])
         return {'status': 'adopting', 'holder': key['name']}
 
+    def user_topic(self, key, name, pin=True):
+        """The adopter asks for a topic made by the user himself (Telegram only lets the user pin topics, and only
+        his topics are adopted): reuse his live topic with that title, else create one as him; pin it if asked."""
+        self._need_ready()
+        d = self._load()
+        a = d['config'].get('adopter')
+        if not a or a['id'] != key['id']:
+            raise TGError('not_holder', '只有接管用户话题的 key（POST /api/bots/adopt）能这样建话题')
+        name = (name or '').strip()[:120]
+        if not name:
+            raise TGError('bad_name', 'name 不能为空')
+        tid = next((t for t, v in d['topics'].items() if v.get('user_created') and not v.get('deleted') and v.get('name') == name), None)
+        if tid is None:
+            tid = str(self.tgs.create_topic(d['group']['channel_id'], name))
+            self._adopt_topic(tid, name)
+            self.log('bots: created topic as the user', tid, name)
+        if pin:
+            self.tgs.pin_topic(d['group']['channel_id'], int(tid))
+        return self._public(tid, self._load()['topics'][tid], key['id'])
+
     def _adopt_topic(self, tid, name):
         d = self._load()
         a = d['config'].get('adopter')

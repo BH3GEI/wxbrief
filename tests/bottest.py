@@ -369,6 +369,13 @@ try:
     check('the adopter writes in them', code == 200 and api.sent[-1] == (GROUP, 301, '收到'))
     code, e = call('/api/send', 'POST', {'chat': 'tgbot:301', 'text': 'x'}, key=B)
     check('other keys cannot', code == 403)
+    code, e = call('/api/bots/user_topic', 'POST', {'name': '全局'}, key=B)
+    check('only the adopter asks for a topic made as the user', code == 403 and e['error'] == 'not_holder')
+    code, g = call('/api/bots/user_topic', 'POST', {'name': '全局'})
+    check('a topic is made as the user, adopted and pinned', code == 200 and g['chat'] == 'tgbot:777' and fake.topics_made[-1][1] == '全局'
+          and fake.pinned[-1][1] == 777 and state()['topics']['777'].get('user_created'), str(g))
+    code, g2 = call('/api/bots/user_topic', 'POST', {'name': '全局'})
+    check('asking again reuses it instead of making another', code == 200 and g2['chat'] == 'tgbot:777' and len(fake.topics_made) == 1, str(fake.topics_made))
     clock[0] += 500 * 3600; ctx.BOTS.sweep()
     check('the user\'s own topics are never closed for being idle', not state()['topics']['301'].get('closed'))
     code, e = call('/api/bots/commands', 'POST', {'commands': [{'command': 'cc_cost', 'description': 'claude · 用量'}]}, key=B)
@@ -408,7 +415,7 @@ try:
     # ---------------- pages
     h = call('/tg', raw=True)[1]
     check('Telegram tab: one folded "exterior" row, closed by default', 'id="botfold"' in h and '<div id="botlist" hidden>' in h)
-    check('closed topics are folded once more under "已结束"', 'id="closedfold"' in h and '已结束 4 个' in h and '1 个进行中' in h and '<div id="closedlist" hidden>' in h)
+    check('closed topics are folded once more under "已结束"', 'id="closedfold"' in h and '已结束 4 个' in h and '2 个进行中' in h and '<div id="closedlist" hidden>' in h)
     check('the folded rows are not <details> (would pause auto refresh)', '<details' not in h[h.index('id="botfold"'):h.index('id="closedlist"')])
     check('your own copies of the bot chat and group are not listed separately', '/chat?c=tg:u7000000001' not in h and '/chat?c=tg:g5550001' not in h)
     h = call('/chat?c=' + q(t2['chat']), raw=True)[1]

@@ -64,6 +64,11 @@ class Fake:
     groups = []
     def create_group(self, title, about, bot_username):
         self.groups.append((title, bot_username)); return 5550001
+    topics_made = []
+    def create_topic(self, channel_id, title):
+        self.topics_made.append((channel_id, title)); return 777
+    pinned = []
+    def pin_topic(self, channel_id, topic_id): self.pinned.append((channel_id, topic_id)); return True
     def contacts(self):
         self.calls.append('contacts')
         return [('tg:u7', '小明', 'xiaoming', 111), ('tg:u50', '没聊过的人', 'nochat', 222)]

@@ -405,6 +405,37 @@ class Live:
             await c.send_message(username, '/start')
         return self._run(go(), 30, login=True)
 
+    async def _channel(self, c, channel_id):
+        from telethon.tl import types
+        try:
+            return await c.get_input_entity(types.PeerChannel(channel_id))
+        except ValueError:          # not in the session's cache yet: the dialog list fills it
+            await c.get_dialogs()
+            return await c.get_input_entity(types.PeerChannel(channel_id))
+
+    def create_topic(self, channel_id, title):
+        """Create a forum topic as the user (so it counts as one he made). Returns its id."""
+        async def go():
+            from telethon.tl import functions, types
+            c = await self._client()
+            peer = await self._channel(c, channel_id)
+            r = await c(functions.messages.CreateForumTopicRequest(peer=peer, title=title, random_id=int.from_bytes(os.urandom(8), 'big', signed=True)))
+            for u in getattr(r, 'updates', []):
+                m = getattr(u, 'message', None)
+                if m is not None and isinstance(getattr(m, 'action', None), types.MessageActionTopicCreate):
+                    return m.id
+            raise TGError('no_topic', 'Telegram 没有返回新话题的编号')
+        return self._run(go(), 30, login=True)
+
+    def pin_topic(self, channel_id, topic_id):
+        async def go():
+            from telethon.tl import functions
+            c = await self._client()
+            peer = await self._channel(c, channel_id)
+            await c(functions.messages.UpdatePinnedForumTopicRequest(peer=peer, topic_id=topic_id, pinned=True))
+            return True
+        return self._run(go(), 30, login=True)
+
     def send(self, ref, text):
         async def go():
             c = await self._client()
@@ -851,6 +882,12 @@ class Service:
 
     def create_group(self, title, about, bot_username):
         return self._call(self.adapter.create_group, title, about, bot_username)
+
+    def create_topic(self, channel_id, title):
+        return self._call(self.adapter.create_topic, channel_id, title)
+
+    def pin_topic(self, channel_id, topic_id):
+        return self._call(self.adapter.pin_topic, channel_id, topic_id)
 
     # -- sending
     def send_direct(self, chat, text):
