@@ -37,4 +37,9 @@ check('$$\n\\frac{1}{1+e^{-x}} \\le \\sqrt{2}\n$$', '1/(1+e⁻ˣ) ≤ √2', [('
 check('```\n| a | b |\n|---|---|\n```', '| a | b |\n|---|---|', [('pre', '| a | b |\n|---|---|')])   # untouched in code
 check('看 README.md 和 knowledge/ops.md。', '看 README.md 和 knowledge/ops.md。', [('code', 'README.md'), ('code', 'knowledge/ops.md')])
 check('见 https://x.com/a/README.md 与 foo.mdx', '见 https://x.com/a/README.md 与 foo.mdx', [])   # URLs and other names untouched
+from tgmd import for_rich, chunks
+assert for_rich('看 README.md 和 `a.md`，[x](https://h/a.md)，https://h/b.md') == '看 `README.md` 和 `a.md`，[x](https://h/a.md)，https://h/b.md', for_rich('看 README.md 和 `a.md`，[x](https://h/a.md)，https://h/b.md')
+assert for_rich('```\nREADME.md\n```\n| a.md | 1 |') == '```\nREADME.md\n```\n| `a.md` | 1 |'
+c = chunks('甲' * 3000 + '\n\n' + '乙' * 3000)
+assert c == ['甲' * 3000, '乙' * 3000], [len(x) for x in c]
 print('tgmd ok')

@@ -43,6 +43,13 @@ class BotAPI:
         self.calls.append((method, p))
         if method == 'getUpdates':
             return [u for u in self.updates if u['update_id'] >= p.get('offset', 0)]
+        if method == 'sendRichMessage' and getattr(self, 'no_rich', False):
+            raise tg.TGError('telegram_error', 'Bad Request: method not supported')
+        if method == 'sendRichMessage':      # recorded like a plain message, text = the Markdown sent
+            method, p = 'sendMessage', dict(p, text=p['rich_message']['markdown'])
+            self.rich = getattr(self, 'rich', 0) + 1
+        if method == 'editMessageText' and 'rich_message' in p:
+            p = dict(p, text=p['rich_message']['markdown'])
         if method == 'sendMessage' and p.get('message_thread_id') in self.deleted_threads:
             raise tg.TGError('telegram_error', 'Bad Request: message thread not found')
         if method == 'setMyCommands':
@@ -385,6 +392,15 @@ try:
           and [c['command'] for c in api.menus[-1]['commands']] == ['cc_cost', 'pi_compact'], str(e))
     code, e = call('/api/bots/commands', 'POST', {'commands': [{'command': 'deep-research', 'description': 'x'}]})
     check('bad command names are refused', code == 400 and e['error'] == 'bad_commands')
+    code, _r = call('/api/send', 'POST', {'chat': 'tgbot:302', 'text': '| a | b |\n|---|---|\n| 1 | 2 |'})
+    check('text goes out as a rich message (Telegram lays out tables and formulas)', code == 200 and api.calls[-1][0] == 'sendRichMessage'
+          and api.calls[-1][1]['rich_message'] == {'markdown': '| a | b |\n|---|---|\n| 1 | 2 |'})
+    api.no_rich = True
+    code, _r = call('/api/send', 'POST', {'chat': 'tgbot:302', 'text': '**表** ' + '长' * 5000})
+    check('if Telegram refuses a rich message, the text goes out plain, split at 4096, with entities',
+          code == 200 and [m for m, _ in api.calls[-2:]] == ['sendMessage', 'sendMessage'] and api.calls[-2][1]['entities'][0]['type'] == 'bold',
+          str((code, _r, [m for m, _ in api.calls[-4:]])))
+    api.no_rich = False
     api.deleted_threads.add(302)
     code, e = call('/api/send', 'POST', {'chat': 'tgbot:302', 'text': '还在吗'})
     check('a topic deleted in Telegram answers 410 topic_deleted', code == 410 and e['error'] == 'topic_deleted', str(e))
@@ -468,7 +484,7 @@ said = set(re.findall(r"(?:say|send_message)\('([^']*)'\)", tgsrc[tgsrc.index('d
 check('the only fixed texts ever sent to BotFather are /newbot and /cancel', said == {'/newbot', '/cancel'}, str(said))
 methods = set(re.findall(r"self\.call\([^,]+, '(\w+)'", botsrc)) | set(re.findall(r"_topic_call\('(\w+)'", botsrc))
 check('Bot API methods used: send, edit own messages, react, read, rename, create/edit/close/reopen topics; nothing that deletes',
-      methods == {'getMe', 'getChat', 'getFile', 'answerCallbackQuery', 'sendMessage', 'editMessageText', 'setMessageReaction', 'setMyCommands', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
+      methods == {'getMe', 'getChat', 'getFile', 'answerCallbackQuery', 'sendMessage', 'sendRichMessage', 'editMessageText', 'setMessageReaction', 'setMyCommands', 'setMyName', 'getUpdates', 'createForumTopic', 'editForumTopic', 'closeForumTopic', 'reopenForumTopic'}, str(methods))
 check('the group is made with manage_topics only', 'ChatAdminRights(manage_topics=True)' in tgsrc)
 
 print('ALL PASS' if ok else 'FAILURES')

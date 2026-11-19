@@ -524,21 +524,18 @@ class Bots:
         text = (text or '').strip()
         if not text:
             raise TGError('empty', '内容是空的')
-        if len(text) > 4096:
-            raise TGError('too_long', 'Telegram 单条消息最多 4096 字')
+        if len(text) > tgmd.RICH_MAX:
+            raise TGError('too_long', f'Telegram 单条消息最多 {tgmd.RICH_MAX} 字')
         tid = chat[len(PREFIX):]
         if t.get('closed'):
             self._reopen(tid)
         d = self._load()
         try:
-            shown, ents = tgmd.render(text)
-            p = {'chat_id': d['group']['id'], 'message_thread_id': int(tid), 'text': shown or text}
-            if ents:
-                p['entities'] = ents
+            base = {'chat_id': d['group']['id'], 'message_thread_id': int(tid)}
             kb = self._keyboard(buttons)
             if kb:
-                p['reply_markup'] = kb
-            m = self.call(d['bot']['token'], 'sendMessage', p, self.proxy())
+                base['reply_markup'] = kb
+            m = self._send_text(d['bot']['token'], base, text)
         except TGError as e:
             if 'THREAD NOT FOUND' in e.msg.upper().replace('_', ' '):
                 self._mark_deleted(tid)
@@ -547,6 +544,24 @@ class Bots:
         mid = self._store(tid, m['message_id'], m.get('date') or int(self.now()), t['name'], text)
         self.touch(chat)
         return {'status': 'sent', 'chat': chat, 'id': mid}
+
+    def _send_text(self, token, base, text):
+        """A rich message (Telegram lays out the Markdown itself: tables, formulas, headings). If Telegram refuses
+        it, the same text as plain messages with our own entities, split at 4096; the last one is returned."""
+        try:
+            return self.call(token, 'sendRichMessage', dict(base, rich_message={'markdown': tgmd.for_rich(text)}), self.proxy())
+        except TGError as e:
+            if e.code in ('rate_limited', 'network') or 'THREAD NOT FOUND' in e.msg.upper().replace('_', ' '):
+                raise
+            self.log('tgbot: rich message refused, sending plain:', e.msg)
+        m = None
+        for part in tgmd.chunks(text):
+            shown, ents = tgmd.render(part)
+            p = dict(base, text=shown or part)
+            if ents:
+                p['entities'] = ents
+            m = self.call(token, 'sendMessage', p, self.proxy())
+        return m
 
     def _target(self, key, chat, mid, user):
         """A stored message in the key's own topic: the user's (user=True) or the bot's. Returns (tid, local_id)."""
@@ -574,18 +589,24 @@ class Bots:
         text = (text or '').strip()
         if not text:
             raise TGError('empty', '内容是空的')
-        if len(text) > 4096:
-            raise TGError('too_long', 'Telegram 单条消息最多 4096 字')
+        if len(text) > tgmd.RICH_MAX:
+            raise TGError('too_long', f'Telegram 单条消息最多 {tgmd.RICH_MAX} 字')
         d = self._load()
         try:
-            shown, ents = tgmd.render(text)
-            p = {'chat_id': d['group']['id'], 'message_id': local, 'text': shown or text}
-            if ents:
-                p['entities'] = ents
+            base = {'chat_id': d['group']['id'], 'message_id': local}
             kb = self._keyboard(buttons)
             if kb:
-                p['reply_markup'] = kb
-            self.call(d['bot']['token'], 'editMessageText', p, self.proxy())
+                base['reply_markup'] = kb
+            try:
+                self.call(d['bot']['token'], 'editMessageText', dict(base, rich_message={'markdown': tgmd.for_rich(text)}), self.proxy())
+            except TGError as e:
+                if e.code in ('rate_limited', 'network') or 'NOT MODIFIED' in e.msg.upper().replace('_', ' ') or len(text) > tgmd.PLAIN_MAX:
+                    raise
+                shown, ents = tgmd.render(text)
+                p = dict(base, text=shown or text)
+                if ents:
+                    p['entities'] = ents
+                self.call(d['bot']['token'], 'editMessageText', p, self.proxy())
         except TGError as e:
             if 'NOT MODIFIED' not in e.msg.upper().replace('_', ' '):
                 raise

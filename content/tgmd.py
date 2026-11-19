@@ -258,3 +258,46 @@ def render(md):
         o.ent('blockquote', quote_start)
     o.ents.sort(key=lambda e: (e['offset'], -e['length']))
     return o.text(), o.ents
+
+
+RICH_MAX = 32768    # Telegram's limit for a rich message, in characters (formula sources included)
+PLAIN_MAX = 4096    # and for a plain one
+_INLINE_CODE = re.compile(r'(`+)(.+?)\1')
+
+
+def for_rich(md):
+    """Markdown for sendRichMessage: Telegram renders it itself (tables, formulas…). Only one thing is adjusted:
+    bare file names like README.md would be auto-linked to a country's domain, so they are put in backticks."""
+    out, fenced = [], False
+    for line in (md or '').split('\n'):
+        if line.strip().startswith('```'):
+            fenced = not fenced
+            out.append(line); continue
+        if fenced:
+            out.append(line); continue
+        parts, last = [], 0
+        for m in _INLINE_CODE.finditer(line):       # leave `code` alone
+            parts.append(_files(line[last:m.start()])); parts.append(m.group(0)); last = m.end()
+        parts.append(_files(line[last:]))
+        out.append(''.join(parts))
+    return '\n'.join(out)
+
+
+def _files(s):
+    def sub(m):
+        i = m.start()
+        before = s[i - 1] if i else ' '
+        if before.isalnum() or before in '_./~-:(<[`\\\\' or '://' in s[s.rfind(' ', 0, i) + 1:m.end()]:
+            return m.group(0)
+        return '`' + m.group(0) + '`'
+    return _FILE.sub(sub, s)
+
+
+def chunks(text, n=PLAIN_MAX):
+    """Split a long text for plain messages, at a paragraph or line break where possible."""
+    out = []
+    while len(text) > n:
+        cut = max(text.rfind('\n\n', 0, n), text.rfind('\n', 0, n))
+        cut = cut if cut > n // 2 else n
+        out.append(text[:cut].rstrip()); text = text[cut:].lstrip('\n')
+    return out + ([text] if text.strip() else [])

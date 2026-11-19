@@ -323,7 +323,7 @@ POST /api/bots   {purpose: 用途}（JSON）
     同一个 key 用同样的 purpose 再调用，会拿回同一个话题（不会重复开）。一个任务一个话题，不要每句话都开新的。
     还没建好时返回 409 not_ready（请我去设置页点“建立”）。
 GET /api/bots    所有话题：status（open/closed）、holder、purpose、last_activity、mine（是不是你开的）。
-POST /api/send   {chat: "tgbot:话题号", text}  在你开的话题里发给我，立即发出，返回 {"status":"sent", id}。只有开这个话题的 key 能发。
+POST /api/send   {chat: "tgbot:话题号", text}  在你开的话题里发给我，立即发出，返回 {"status":"sent", id}。只有开这个话题的 key 能发。text 按 Markdown 显示（Telegram 富文本消息：表格、$公式$、标题、列表、引用、代码块都原样排版），最多 32768 字。
     可加 buttons：按行的按钮，[[{"text": "Opus", "data": "/cc_model opus"}, ...], ...]（也可以直接写字符串）。我点了按钮，就等于我发了一条内容为 data 的消息（data 最多 64 字节）。
 POST /api/send_file  {chat: "tgbot:话题号", name: "图.png", data: "<base64>", text: "可选说明"}  在你的话题里发图片（直接显示）或任意文件给我，最大 20MB。
     我在话题里发的图片和文件：消息里有 media.url，GET 它（带同样的 Authorization）就能下载原件。
