@@ -247,7 +247,7 @@ def make_handler(K):
                     elif u.path == '/api/bots/adopt':
                         res = ctx.BOTS.adopt(key)
                     elif u.path == '/api/bots/user_topic':
-                        res = ctx.BOTS.user_topic(key, f.get('name', ''), f.get('pin', True) is not False)
+                        res = ctx.BOTS.user_topic(key, f.get('name', ''), f.get('pin') is True)
                     elif u.path == '/api/bots/commands':
                         res = ctx.BOTS.commands(key, f.get('commands'))
                     elif u.path == '/api/bots':

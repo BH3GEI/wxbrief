@@ -417,9 +417,9 @@ class Bots:
         self.log('bots: adopter is now', key['name'])
         return {'status': 'adopting', 'holder': key['name']}
 
-    def user_topic(self, key, name, pin=True):
+    def user_topic(self, key, name, pin=False):
         """The adopter asks for a topic made by the user himself (Telegram only lets the user pin topics, and only
-        his topics are adopted): reuse his live topic with that title, else create one as him; pin it if asked."""
+        his topics are adopted): reuse his live topic with that title, else create one as him; pin it only if asked (pin: true)."""
         self._need_ready()
         d = self._load()
         a = d['config'].get('adopter')
