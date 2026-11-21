@@ -40,6 +40,7 @@ check('见 https://x.com/a/README.md 与 foo.mdx', '见 https://x.com/a/README.m
 from tgmd import for_rich, chunks
 assert for_rich('看 README.md 和 `a.md`，[x](https://h/a.md)，https://h/b.md') == '看 `README.md` 和 `a.md`，[x](https://h/a.md)，https://h/b.md', for_rich('看 README.md 和 `a.md`，[x](https://h/a.md)，https://h/b.md')
 assert for_rich('```\nREADME.md\n```\n| a.md | 1 |') == '```\nREADME.md\n```\n| `a.md` | 1 |'
+assert for_rich('**结果：**\n| a | b |\n|---|---|\n| 1 | 2 |') == '**结果：**\n\n| a | b |\n|---|---|\n| 1 | 2 |'
 c = chunks('甲' * 3000 + '\n\n' + '乙' * 3000)
 assert c == ['甲' * 3000, '乙' * 3000], [len(x) for x in c]
 check('答\n\n<footer>⚙️ exterior · a &lt;b&gt;<br>c</footer>', '答\n\n⚙️ exterior · a <b>\nc', [('italic', '⚙️ exterior · a <b>\nc')])

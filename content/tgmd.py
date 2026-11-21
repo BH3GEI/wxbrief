@@ -270,11 +270,19 @@ PLAIN_MAX = 4096    # and for a plain one
 _INLINE_CODE = re.compile(r'(`+)(.+?)\1')
 
 
+_DELIM = re.compile(r'^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$')
+
+
 def for_rich(md):
     """Markdown for sendRichMessage: Telegram renders it itself (tables, formulas…). Only one thing is adjusted:
-    bare file names like README.md would be auto-linked to a country's domain, so they are put in backticks."""
+    bare file names like README.md would be auto-linked to a country's domain, so they are put in backticks;
+    a table right under a text line gets a blank line before it, or Telegram shows it as plain text."""
     out, fenced = [], False
-    for line in (md or '').split('\n'):
+    lines = (md or '').split('\n')
+    for k, line in enumerate(lines):
+        if (not fenced and line.lstrip().startswith('|') and k + 1 < len(lines) and _DELIM.match(lines[k + 1])
+                and out and out[-1].strip() and not out[-1].lstrip().startswith('|')):
+            out.append('')
         if line.strip().startswith('```'):
             fenced = not fenced
             out.append(line); continue
