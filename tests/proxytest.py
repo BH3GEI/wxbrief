@@ -70,5 +70,26 @@ try:
 except tg.TGError:
     check('parse_proxy: rejects a bad item', True)
 
+# built-in proxy settings (proxyctl): subscription file and the Telegram proxy list
+import tempfile, proxyctl  # noqa: E402
+os.environ['VAR'] = tempfile.mkdtemp(prefix='wxbrief-proxy-')
+L = proxyctl.LOCAL
+check('with_local on: first, others kept', proxyctl.with_local('socks5://r:1', True) == f'{L}, socks5://r:1')
+check('with_local on: no duplicate', proxyctl.with_local(f'socks5://r:1, {L}', True) == f'{L}, socks5://r:1')
+check('with_local off: removed, others kept', proxyctl.with_local(f'{L}, socks5://r:1', False) == 'socks5://r:1')
+check('with_local on empty', proxyctl.with_local('', True) == L)
+check('off by default', not proxyctl.enabled() and proxyctl.status()['enabled'] is False)
+try:
+    proxyctl.set_sub('ftp://x'); check('bad subscription rejected', False)
+except ValueError:
+    check('bad subscription rejected', True)
+proxyctl.set_sub('https://example.invalid/sub')
+f = os.path.join(os.environ['VAR'], 'mihomo', 'sub_url')
+check('subscription saved 0600', proxyctl.enabled() and oct(os.stat(f).st_mode & 0o777) == '0o600')
+st = proxyctl.status()
+check('enabled but service unreachable: not running, error given', st['enabled'] and not st['running'] and st['error'])
+proxyctl.turn_off()
+check('turned off: emptied, not deleted', os.path.exists(f) and not proxyctl.enabled())
+
 print(f'{ok} passed, {fail} failed')
 sys.exit(1 if fail else 0)

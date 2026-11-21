@@ -1,5 +1,6 @@
 """The phone-sized web pages. Static CSS / JS live in web/."""
 import html, json, os, threading, time
+import proxyctl
 import urllib.parse
 from urllib.parse import parse_qs
 
@@ -529,8 +530,32 @@ def settings_page(K):
              f'<label class="sub">代理（盒子连不上 Telegram 时需要）</label><input name="proxy" placeholder="socks5://地址:端口，多个用逗号隔开，连不上时依次轮换" value="{e(st["proxy"])}">'
              '<button class="pri">保存</button></form></details></div>')
     out.append(''.join(t))
+    out.append(proxy_settings(st['proxy']))
     out.append(bots_settings())
     return page('设置', ''.join(out) + TWO_JS)
+
+def proxy_settings(current):
+    e = html.escape
+    ps = proxyctl.status()
+    out = ['<div class="sec" id="proxy"><h3>自带代理</h3>',
+           '<p class="sub">盒子自己跑一个 mihomo，从你的订阅里自动选到 Telegram 最快的节点，每 60 秒重测，节点不通就换。'
+           '启用后 Telegram 代理会把 <code>' + proxyctl.LOCAL + '</code> 放在最前面，原来的代理留在后面作备用，连不上时依次轮换。</p>']
+    if not ps['enabled']:
+        out.append('<p>未启用。</p>')
+    elif ps['running']:
+        out.append(f'<p>运行中 · 当前节点 <b>{e(ps["node"])}</b>（{ps["delay"]} ms）· 可用 {ps["alive"]}/{ps["total"]} 个节点</p>')
+    else:
+        out.append(f'<p>正在启动或连不上（{e(ps["error"])}），几秒后刷新再看。</p>')
+    if ps['enabled'] and proxyctl.LOCAL not in (current or ''):
+        out.append('<p class="err">Telegram 代理里没有自带代理，保存一次订阅即可加回去。</p>')
+    out.append('<form method="post" action="/proxy/config">'
+               f'<label class="sub">订阅链接 {"（已设置，不改就留空）" if ps["enabled"] else ""}</label>'
+               '<input name="sub" type="password" autocomplete="off" placeholder="https://…">'
+               '<button class="pri">保存</button>'
+               + ('<button name="off" value="1">停用</button>' if ps['enabled'] else '') +
+               '</form></div>')
+    return ''.join(out)
+
 
 def bots_settings():
     if not ctx.BOTS:

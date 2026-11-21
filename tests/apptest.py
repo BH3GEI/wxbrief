@@ -132,6 +132,7 @@ try:
     check('Telegram chat page works; ready media shown, others offer download', code == 200 and '看这张' in h and '/media/' in h)
     code, h = call('/settings', raw=True); h = h.decode()
     check('settings has WeChat key + Telegram sections', '密钥' in h and 'Telegram' in h and '连接设置' in h)
+    check('settings has the built-in proxy section, off by default', '自带代理' in h and '未启用' in h and 'action="/proxy/config"' in h)
     check('settings never echoes api_hash or session', 'api_hash' in h and '"h"' not in h and 'value="h"' not in h)
     code, h = call('/keys', raw=True); h = h.decode()
     check('keys page: three agent texts per key', h.count('data-w=') == 3 and 'data-w="telegram"' in h and 'data-w="wechat"' in h)
@@ -158,6 +159,20 @@ try:
     h = call('/chat?c=tg:u7', raw=True)[1].decode()
     check('chat page: scrolls to the latest, has the auto-refresh switch and the new-messages pill logic', 'scrollTo(0,document.documentElement.scrollHeight)' in h and 'id="autot"' in h and 'newpill' in h)
     check('home and Telegram tabs also have the auto-refresh switch', all('id="autot"' in call(u, raw=True)[1].decode() for u in ('/', '/tg')))
+
+    # ---- built-in proxy: saving a subscription puts it first in the Telegram proxy list; off takes it out
+    ctx.TGS.set_config(proxy='socks5://r:1')
+    code, _ = post_form('/proxy/config', sub='https://example.invalid/sub')
+    check('proxy: subscription saved, built-in proxy first, old one kept', code == 303 and ctx.TGS.config()['proxy'] == 'socks5://proxy:7890, socks5://r:1')
+    h = call('/settings', raw=True)[1].decode()
+    check('proxy: page says enabled, never echoes the URL', '未启用' not in h and 'example.invalid' not in h and '停用' in h)
+    code, _ = post_form('/proxy/config', sub='')
+    check('proxy: saving empty keeps the URL', open(os.path.join(os.environ['VAR'], 'mihomo', 'sub_url')).read().strip() == 'https://example.invalid/sub')
+    code, _ = post_form('/proxy/config', off='1')
+    check('proxy: off empties the URL and restores the list', code == 303 and ctx.TGS.config()['proxy'] == 'socks5://r:1' and '未启用' in call('/settings', raw=True)[1].decode())
+    code, _ = post_form('/proxy/config', sub='ftp://nope')
+    check('proxy: bad URL is refused', code == 400)
+    ctx.TGS.set_config(proxy='')
 
     n0 = fake.calls.count('dialogs')
     code, _ = post_form('/refresh', to='/tg'); settle(); check('refresh on the Telegram tab re-reads the dialog list (in the background)', code == 303 and fake.calls.count('dialogs') == n0 + 1)

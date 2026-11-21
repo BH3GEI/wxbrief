@@ -152,7 +152,7 @@ python3 tests/proxytest.py     # Bot API 代理轮换
 
 
 ### Telegram 代理（可选，0.9.28）
-设置页的代理可以填多个（逗号隔开），连不上时依次轮换，下次先用上次成功的那个。应用里带一个可选的 mihomo 服务 `proxy`：在 `/lzcapp/var/mihomo/sub_url` 写一行订阅链接（只存在盒子上），它就自动选到 api.telegram.org 延迟最低的节点（每 60 秒重测），监听应用内的 `proxy:7890`；代理填 `socks5://proxy:7890`，后面可以再跟一个备用代理。
+设置页的代理可以填多个（逗号隔开），连不上时依次轮换，下次先用上次成功的那个。应用里带一个可选的 mihomo 服务 `proxy`：在设置页「自带代理」填订阅链接（存在盒子上的 `/lzcapp/var/mihomo/sub_url`，页面不再显示），它就自动选到 api.telegram.org 延迟最低的节点（每 60 秒重测），监听应用内的 `proxy:7890`，并把它放到 Telegram 代理列表最前面（原来的留作备用）；页面显示当前节点、延迟和可用节点数，可随时停用。
 
 ## License
 

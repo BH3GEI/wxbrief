@@ -9,7 +9,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor'))
 import base64
-import runenv, ctx, wxdb, media, apikeys, keys as keymod, tg, tgbot
+import runenv, ctx, wxdb, media, apikeys, keys as keymod, tg, tgbot, proxyctl
 from api import api, api_send, draft_create, draft_dismiss, draft_get, draft_list, help_text, tg_reply, wait_new
 from ctx import STATE, VAR, WECHAT, db, init_store, log
 from pages import base_url, chat, do_refresh, home, keys_page, older_page, page, ping_version, settings_page, sync_part, tg_home, tgsearch_page
@@ -259,7 +259,7 @@ def make_handler(K):
                 # because we bind to 127.0.0.1); /api/ is the public path and stays read-only.
                 if u.path not in ('/keys/create', '/keys/revoke', '/keys/reset', '/drafts/dismiss', '/capture/start', '/capture/cancel',
                                   '/tg/config', '/tg/login', '/tg/password', '/tg/logout', '/tg/send', '/refresh',
-                                  '/bots/config', '/bots/setup'):
+                                  '/bots/config', '/bots/setup', '/proxy/config'):
                     return self.send('not found', 404, 'text/plain')
                 # CSRF guard. Some webviews send neither header; the Lazycat login cookie is what really gates this.
                 origin = self.headers.get('Origin') or self.headers.get('Referer') or ''
@@ -284,6 +284,23 @@ def make_handler(K):
                     ctx.TGS.set_config(f.get('api_id', [''])[0], f.get('api_hash', [''])[0], f.get('proxy', [''])[0])
                     log('telegram: settings saved')
                     return self.redirect('/settings')
+                if u.path == '/proxy/config':
+                    cur = ctx.TGS.config().get('proxy', '')
+                    if f.get('off'):
+                        proxyctl.turn_off()
+                        ctx.TGS.set_config(proxy=proxyctl.with_local(cur, False))
+                        log('proxy: turned off')
+                    else:
+                        sub = f.get('sub', [''])[0].strip()
+                        if sub:
+                            try:
+                                proxyctl.set_sub(sub)
+                            except ValueError as ex:
+                                return self.send(page('出错了', f'<p>{html.escape(str(ex))}</p>'), 400)
+                        if sub or proxyctl.enabled():
+                            ctx.TGS.set_config(proxy=proxyctl.with_local(cur, True))
+                            log('proxy: subscription saved')
+                    return self.redirect('/settings#proxy')
                 if u.path == '/tg/login':
                     ctx.TGS.login_qr(); return self.redirect('/settings')
                 if u.path == '/tg/password':
