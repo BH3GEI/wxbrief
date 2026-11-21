@@ -145,6 +145,7 @@ python3 tests/tgtest.py        # Telegram 的缓存、补全、搜索、发送�
 python3 tests/bottest.py       # bot 和话题群（模拟账号、Bot API 和 BotFather 对话）
 python3 tests/locktest.py      # 慢操作期间不占用数据库写锁
 python3 tests/memscan_test.py  # 进程内存扫描（Windows/Linux 直接可跑）
+python3 tests/proxytest.py     # Bot API 代理轮换
 ```
 
 测试不会读取本机真实的微信或 Telegram 数据。
