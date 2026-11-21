@@ -18,3 +18,8 @@ services:
     command: /bin/sh /lzcapp/pkg/content/start.sh capture
     environment:
       - TZ=America/Los_Angeles
+  proxy:
+    image: registry.lazycat.cloud/lzc/lzcapp:3.20.3-2
+    command: /bin/sh /lzcapp/pkg/content/proxy.sh
+    environment:
+      - TZ=America/Los_Angeles

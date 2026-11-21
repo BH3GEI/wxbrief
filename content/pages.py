@@ -526,7 +526,7 @@ def settings_page(K):
              '<form method="post" action="/tg/config">'
              f'<label class="sub">api_id（在 my.telegram.org 申请）</label><input name="api_id" inputmode="numeric" value="{e(st["api_id"])}">'
              f'<label class="sub">api_hash {"（已设置，不改就留空）" if st["api_hash_set"] else ""}</label><input name="api_hash" type="password" autocomplete="off">'
-             f'<label class="sub">代理（盒子连不上 Telegram 时需要）</label><input name="proxy" placeholder="socks5://地址:端口" value="{e(st["proxy"])}">'
+             f'<label class="sub">代理（盒子连不上 Telegram 时需要）</label><input name="proxy" placeholder="socks5://地址:端口，多个用逗号隔开，连不上时依次轮换" value="{e(st["proxy"])}">'
              '<button class="pri">保存</button></form></details></div>')
     out.append(''.join(t))
     out.append(bots_settings())

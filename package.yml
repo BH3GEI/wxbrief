@@ -1,5 +1,5 @@
 package: bh3gei.lzcapp.wxbrief
-version: 0.9.27
+version: 0.9.28
 name: 消息简报
 description: >-
   只读读取云微信的聊天记录，原文全部保留，图片、视频、文件、语音原件可直接打开，给 agent 提供 JSON 接口，手机上也能翻看和搜索。

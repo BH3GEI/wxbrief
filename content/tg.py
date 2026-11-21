@@ -459,16 +459,21 @@ class Live:
 
 
 def parse_proxy(s):
-    """'socks5://host:port' (also socks4, http, user:pass@) -> Telethon proxy tuple, or None."""
-    s = (s or '').strip()
-    if not s:
+    """'socks5://host:port' (also socks4, http, user:pass@) -> Telethon proxy tuple, or None.
+    The setting may list several proxies (comma or space separated): all are checked, the user account uses
+    the first; the bot rotates through them (tgbot.proxies)."""
+    items = [p for p in re.split(r'[\s,]+', (s or '').strip()) if p]
+    if not items:
         return None
-    m = re.match(r'^(socks5|socks4|http)://(?:([^:@/]+):([^@/]*)@)?([^:/]+):(\d+)/?$', s)
-    if not m:
-        raise TGError('bad_proxy', '代理格式应为 socks5://地址:端口')
-    scheme, user, pw, host, port = m.groups()
-    t = (scheme, host, int(port))
-    return t + (True, user, pw) if user else t
+    out = None
+    for item in items:
+        m = re.match(r'^(socks5|socks4|http)://(?:([^:@/]+):([^@/]*)@)?([^:/]+):(\d+)/?$', item)
+        if not m:
+            raise TGError('bad_proxy', '代理格式应为 socks5://地址:端口，多个用逗号隔开')
+        scheme, user, pw, host, port = m.groups()
+        t = (scheme, host, int(port))
+        out = out or (t + (True, user, pw) if user else t)
+    return out
 
 
 # ---------------------------------------------------------------- service (cache, rules)

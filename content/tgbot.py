@@ -33,7 +33,7 @@ def is_bot(chat):
 
 
 class _Conn(http.client.HTTPSConnection):
-    """HTTPS to the Bot API, through the configured SOCKS5/HTTP proxy if any."""
+    """HTTPS to the Bot API, through one SOCKS5/HTTP proxy if given."""
     def __init__(self, proxy, timeout):
         super().__init__(API_HOST, 443, timeout=timeout, context=ssl.create_default_context())
         self._proxy = proxy
@@ -42,19 +42,58 @@ class _Conn(http.client.HTTPSConnection):
         if not self._proxy:
             return super().connect()
         from python_socks.sync import Proxy
-        raw = Proxy.from_url(self._proxy).connect(dest_host=API_HOST, dest_port=443, timeout=self.timeout)
-        raw.settimeout(self.timeout)
+        t = min(self.timeout, CONNECT_TIMEOUT)    # a dead proxy must not hold a call for the whole read timeout
+        raw = Proxy.from_url(self._proxy).connect(dest_host=API_HOST, dest_port=443, timeout=t)
+        raw.settimeout(t)
         self.sock = self._context.wrap_socket(raw, server_hostname=API_HOST)
+        self.sock.settimeout(self.timeout)
+
+
+CONNECT_TIMEOUT = 10
+_GOOD = {}    # proxy setting -> index of the proxy in it that worked last
+
+
+def proxies(setting):
+    """The proxy setting may list several proxies (comma or space separated); '' means a direct connection."""
+    return [p for p in re.split(r'[\s,]+', setting or '') if p] or ['']
+
+
+def _open(setting, timeout):
+    """A connected _Conn. Tries the proxies in turn, starting with the one that worked last."""
+    ps = proxies(setting)
+    start, last = _GOOD.get(setting, 0) % len(ps), None
+    for i in range(len(ps)):
+        k = (start + i) % len(ps)
+        conn = _Conn(ps[k], timeout)
+        try:
+            conn.connect()
+        except Exception as e:      # OSError, timeouts, python_socks errors: try the next proxy
+            conn.close()
+            last = e
+            continue
+        _GOOD[setting] = k
+        return conn, k
+    raise TGError('network', f'连不上 Telegram Bot API：{type(last).__name__}，请检查代理')
+
+
+def _failed(setting, k):
+    """A call broke after connecting: the next call starts with the next proxy."""
+    _GOOD[setting] = k + 1
+
+
+def _net_error(e):
+    return TGError('network', f'连不上 Telegram Bot API：{type(e).__name__}，请检查代理')
 
 
 def bot_call(token, method, params=None, proxy='', timeout=30):
     """One Bot API call; returns `result` or raises TGError."""
-    conn = _Conn(proxy, timeout)
+    conn, k = _open(proxy, timeout)
     try:
         conn.request('POST', f'/bot{token}/{method}', json.dumps(params or {}).encode(), {'Content-Type': 'application/json'})
         d = json.loads(conn.getresponse().read() or b'{}')
     except (OSError, socket.timeout, ValueError) as e:
-        raise TGError('network', f'连不上 Telegram Bot API：{type(e).__name__}，请检查代理')
+        _failed(proxy, k)
+        raise _net_error(e)
     finally:
         conn.close()
     if not d.get('ok'):
@@ -66,7 +105,7 @@ def bot_call(token, method, params=None, proxy='', timeout=30):
 
 def bot_get_file(token, path, proxy='', timeout=120):
     """Download a file the Bot API points to (getFile → file_path)."""
-    conn = _Conn(proxy, timeout)
+    conn, k = _open(proxy, timeout)
     try:
         conn.request('GET', f'/file/bot{token}/{path}')
         r = conn.getresponse()
@@ -75,7 +114,8 @@ def bot_get_file(token, path, proxy='', timeout=120):
             raise TGError('not_available', f'Telegram 没给文件（{r.status}）')
         return data
     except (OSError, socket.timeout) as e:
-        raise TGError('network', f'连不上 Telegram Bot API：{type(e).__name__}，请检查代理')
+        _failed(proxy, k)
+        raise _net_error(e)
     finally:
         conn.close()
 
@@ -90,12 +130,13 @@ def bot_upload(token, method, fields, field, name, data, proxy='', timeout=120):
     safe = name.replace('"', '')
     parts.append(f'--{b}\r\nContent-Disposition: form-data; name="{field}"; filename="{safe}"\r\nContent-Type: {mime}\r\n\r\n'.encode() + data + b'\r\n')
     body = b''.join(parts) + f'--{b}--\r\n'.encode()
-    conn = _Conn(proxy, timeout)
+    conn, k = _open(proxy, timeout)
     try:
         conn.request('POST', f'/bot{token}/{method}', body, {'Content-Type': f'multipart/form-data; boundary={b}'})
         d = json.loads(conn.getresponse().read() or b'{}')
     except (OSError, socket.timeout, ValueError) as e:
-        raise TGError('network', f'连不上 Telegram Bot API：{type(e).__name__}，请检查代理')
+        _failed(proxy, k)
+        raise _net_error(e)
     finally:
         conn.close()
     if not d.get('ok'):
@@ -786,7 +827,7 @@ class Bots:
             except Exception as e:
                 self.log('bots: listen', getattr(e, 'msg', repr(e))[:160])
                 time.sleep(delay)
-                delay = min(delay * 2, 300)
+                delay = min(delay * 2, 30)    # back soon once the network is back
 
     def start(self):
         if self._load().get('bot'):

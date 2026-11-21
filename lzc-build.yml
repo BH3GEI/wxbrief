@@ -1,4 +1,4 @@
-buildscript: sh ./fetch-vendor.sh && sh ./fetch-apk.sh
+buildscript: sh ./fetch-vendor.sh && sh ./fetch-apk.sh && sh ./fetch-mihomo.sh
 manifest: ./lzc-manifest.yml
 contentdir: ./content
 pkgout: ./dist
