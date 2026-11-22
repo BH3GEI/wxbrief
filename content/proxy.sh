@@ -2,8 +2,9 @@
 # Optional proxy for reaching the Telegram Bot API, so the box does not depend on a router's proxy.
 # Off while $VAR/mihomo/sub_url is missing or empty; the settings page writes it (one line, a subscription URL,
 # private: it never goes into this repo). With a URL, mihomo runs with one group that picks the node with the
-# lowest delay to api.telegram.org (re-tested every 60 s) and listens on :7890 (SOCKS5 and HTTP) inside this
-# app's network; its API on :9090 (secret in $D/secret) is only for the settings page's status.
+# lowest delay to api.telegram.org (re-tested every 60 s; it only switches to a node at least 300 ms faster, so
+# one lucky test of a flaky node does not pull the traffic over) and listens on :7890 (SOCKS5 and HTTP) inside
+# this app's network; its API on :9090 (secret in $D/secret) is only for the settings page's status.
 # A changed or emptied sub_url is picked up within 5 s; mihomo is restarted if it exits.
 D=/lzcapp/var/mihomo
 BIN=/lzcapp/pkg/content/bin/mihomo
@@ -37,7 +38,7 @@ proxy-providers:
     interval: 21600
     health-check: {enable: true, url: "$TEST", interval: 60, timeout: 5000, lazy: false}
 proxy-groups:
-  - {name: fastest, type: url-test, use: [sub], url: "$TEST", interval: 60, tolerance: 50, timeout: 5000, lazy: false}
+  - {name: fastest, type: url-test, use: [sub], url: "$TEST", interval: 60, tolerance: 300, timeout: 5000, lazy: false}
 rules:
   - MATCH,fastest
 CFG
