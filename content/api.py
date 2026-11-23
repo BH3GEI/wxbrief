@@ -347,6 +347,7 @@ GET /api/wait?chat=tgbot:话题号&after_id=<上面返回的 id>   等我回复�
       done
 POST /api/bots/adopt  {}  （给 exterior 这类常驻程序用）由你这个 key 接管我自己在群里新建的话题：之后我建的话题都归你，标题就是名字，我改标题会跟着改；这类话题不会因闲置被关。同一时间只有一个 key 接管。
 POST /api/bots/user_topic  {"name": "全局", "pin": true}  （只有接管用户话题的 key 能用）用我的 Telegram 账号在群里建一个以 name 为标题的话题（已有同名的就用它）；带 "pin": true 时置顶，默认不置顶。机器人不能置顶话题，也不能建出算我建的话题，所以要走我的账号。
+POST /api/bots/rename  {"chat": "tgbot:话题号", "name": "新标题"}  （只有接管用户话题的 key 能用）用我的账号给我建的话题改标题，返回改后的话题。
 POST /api/bots/commands  {commands: [{command, description}]}  接管者设置群里的「/」命令菜单；命令名只能是小写字母、数字、下划线。
     话题在 Telegram 里被删掉后，往里发消息会返回 410 topic_deleted，GET /api/bots 里它的 deleted 为 true。
 POST /api/bots/release   {chat}  任务结束时关闭话题（可选）。不关的话，闲置一段时间（默认 72 小时，我可以改）后自动关闭，标题前加“✓ ”。

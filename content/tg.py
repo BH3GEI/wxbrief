@@ -436,6 +436,20 @@ class Live:
             raise TGError('no_topic', 'Telegram 没有返回新话题的编号')
         return self._run(go(), 30, login=True)
 
+    def rename_topic(self, channel_id, topic_id, title):
+        """Rename a forum topic as the user (his topics are his to rename)."""
+        async def go():
+            from telethon.tl import functions
+            c = await self._client()
+            peer = await self._channel(c, channel_id)
+            try:
+                await c(functions.messages.EditForumTopicRequest(peer=peer, topic_id=topic_id, title=title))
+            except Exception as e:
+                if 'TOPIC_NOT_MODIFIED' not in str(e):     # already so named is what we want
+                    raise
+            return True
+        return self._run(go(), 30, login=True)
+
     def pin_topic(self, channel_id, topic_id):
         async def go():
             from telethon.tl import functions
@@ -970,6 +984,9 @@ class Service:
 
     def pin_topic(self, channel_id, topic_id):
         return self._call(self.adapter.pin_topic, channel_id, topic_id)
+
+    def rename_topic(self, channel_id, topic_id, title):
+        return self._call(self.adapter.rename_topic, channel_id, topic_id, title)
 
     # -- sending
     def send_direct(self, chat, text):

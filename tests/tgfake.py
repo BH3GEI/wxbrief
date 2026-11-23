@@ -69,6 +69,8 @@ class Fake:
         self.topics_made.append((channel_id, title)); return 777
     pinned = []
     def pin_topic(self, channel_id, topic_id): self.pinned.append((channel_id, topic_id)); return True
+    renamed = []
+    def rename_topic(self, channel_id, topic_id, title): self.renamed.append((channel_id, topic_id, title)); return True
     def contacts(self):
         self.calls.append('contacts')
         return [('tg:u7', '小明', 'xiaoming', 111), ('tg:u50', '没聊过的人', 'nochat', 222)]

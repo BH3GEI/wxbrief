@@ -590,6 +590,25 @@ class Bots:
             self.tgs.pin_topic(d['group']['channel_id'], int(tid))
         return self._public(tid, self._load()['topics'][tid], key['id'])
 
+    def rename(self, key, chat, name):
+        """The adopter renames one of the user's topics (as the user, so it works whatever the bot may do)."""
+        self._need_ready()
+        d = self._load()
+        a = d['config'].get('adopter')
+        if not a or a['id'] != key['id']:
+            raise TGError('not_holder', '只有接管用户话题的 key（POST /api/bots/adopt）能给话题改名')
+        name = (name or '').strip()[:120]
+        if not name:
+            raise TGError('bad_name', 'name 不能为空')
+        tid = chat[len(PREFIX):] if (chat or '').startswith(PREFIX) else ''
+        t = d['topics'].get(tid)
+        if not t or not t.get('user_created') or t.get('deleted'):
+            raise TGError('unknown_chat', '没有这个话题，或它不是我自己建的话题')
+        self.tgs.rename_topic(d['group']['channel_id'], int(tid), name)
+        self._rename_topic(tid, name)
+        self.log('bots: renamed topic', tid, t.get('name'), '->', name)
+        return self._public(tid, self._load()['topics'][tid], key['id'])
+
     def _adopt_topic(self, tid, name):
         d = self._load()
         a = d['config'].get('adopter')
