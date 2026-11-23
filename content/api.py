@@ -235,7 +235,7 @@ def agent_line(base, key, which='all'):
          '应用会自己从 Telegram 现查，第一次默认只拉最近 200 条（&limit= 最多 500）；要更早的加 &days=N 补齐最近 N 天'
          '（消息多时一次补不完，再调一次接着补），找很早的某句话用 /api/search?q=…&source=telegram&live=1；&live=0 只看缓存。图片/文件/语音默认只有占位，'
          '请求 GET /api/media/消息ID 时才会下载（media.status 是 not_downloaded 或 ready）。'
-         'GET /api/contacts?source=telegram 查通讯录（含没聊过的人，不含手机号）。发消息：POST /api/send，JSON {chat, text}；发给 tg:me（我的收藏夹）会直接发出，发给别人只会放进草稿，等我在页面上确认。'
+         'GET /api/contacts?source=telegram 查通讯录（含没聊过的人，不含手机号）。发消息：POST /api/send，JSON {chat, text}；发给 tg:me（我的收藏夹）和我设的白名单里的会话会直接发出，发给别人只会放进草稿，等我在页面上确认。'
          '被限流时返回 {error: rate_limited, retry_after: 秒}，请等待后再试。你的读取不会标记已读。'
          '想直接和我对话：POST /api/bots {purpose: 这次任务的用途（20 字内，和会话目的相关）} 开一个话题（会话ID 形如 tgbot:123），'
          '用 POST /api/send 通过它发给我（直接推到我手机），用 GET /api/wait?chat=它&after_id=上次的id 等我回复（只返回我的消息）；'
@@ -308,6 +308,7 @@ GET /api/messages?chat=tg:...&limit=200[&days=N]
     GET /api/media/<消息id> 才会从 Telegram 下载（可能要几秒），之后 status=ready 并缓存；缓存超过 30 天或 2GB 会自动清理，清掉后可再下载。
 发送：POST /api/send   {chat: 会话ID, text: 文本, note: 可选说明}（JSON）
     chat 是 tg:me（收藏夹）：立即发出，返回 {"status":"sent", message_id, ts}。适合把结果、提醒发到我手机上。
+    chat 在我设的白名单里（设置页「直接发送白名单」）：立即发出，返回 {"status":"sent", message_id, ts}。
     chat 是别的 Telegram 会话：不会发出，放进草稿，返回 {"status":"pending_approval", draft_id}；我在页面上点两次确认后才会发送。
     微信会话：返回 wechat_send_unsupported（微信只读）。
 搜索：/api/search 默认只能搜到已经读取过的会话。要搜 Telegram 的全部历史，加 live=1：GET /api/search?q=关键词&source=telegram&live=1（可加 &chat=tg:… 限定会话）。
@@ -415,6 +416,8 @@ def api_send(chat, text, note='', key=None, buttons=None):
         raise tg.TGError('unknown_chat', '没有这个 Telegram 会话。先 GET /api/chats?source=telegram 看有哪些。')
     if not (text or '').strip():
         raise tg.TGError('empty', '内容是空的')
+    if chat in ctx.TGS.allowed():
+        return ctx.TGS.send_direct(chat, text)
     d = draft_create(chat, text, note or '')
     return {'status': 'pending_approval', 'draft_id': (d or {}).get('id'),
             'message': '已放进草稿，等用户在页面上确认后才会发送。'}

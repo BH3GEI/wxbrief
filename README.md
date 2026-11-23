@@ -11,7 +11,7 @@
   语音（SILK 转 WAV）原件可取；微信里点过“转文字”的语音，转写写进消息文本。
 - **Telegram（用户账号）**：扫码登录，按需读取（没有后台监听，读取不标记已读），媒体懒加载，可现查全部历史。
 - **通讯录**：微信和 Telegram 的联系人，包括没聊过的人。
-- **发送有边界**：微信不发送；Telegram 只有发给自己的收藏夹和 agent 自己开的话题会直接发出，发给别人一律变成草稿，
+- **发送有边界**：微信不发送；Telegram 只有发给自己的收藏夹、agent 自己开的话题和设置页「直接发送白名单」里的会话会直接发出，发给别人一律变成草稿，
   由本人在网页上点两次确认。
 - **和 agent 对话**：agent 在一个只有本人和 bot 的群里开话题，把消息推到本人手机，并等待回复。
 - **网页**：微信 / Telegram 两个标签，会话列表、搜索（命中高亮、定位到原消息）、聊天记录（往上划加载更早的消息）、
@@ -31,7 +31,7 @@ GET  /api/search?q=&source=&chat=&limit=[&live=1]                        # live=
 GET  /api/wait?after_id=&chat=&source=&timeout=                          # 等新消息，一到就返回
 GET  /api/contacts?q=&source=&kind=&type=
 GET  /api/media/<消息id>[?thumb=1][&format=silk]
-POST /api/send     {"chat", "text", "note"}    # 收藏夹和自己领的 bot 直接发出；其他 Telegram 会话进草稿
+POST /api/send     {"chat", "text", "note"}    # 收藏夹、自己领的 bot、白名单里的会话直接发出；其他 Telegram 会话进草稿
 POST /api/drafts   {"chat", "body", "note"}    # 建议回复（微信用这个，由本人复制）
 GET  /api/drafts[?chat=]      DELETE /api/drafts/<id>
 GET  /api/bots     POST /api/bots {"purpose"}     POST /api/bots/release {"chat"}
@@ -50,7 +50,7 @@ GET  /api/status   GET /api/help
 - 只有 agent 或页面请求某个会话时才去 Telegram 读取。第一次只拉最近 200 条（`limit` 最多 500），快，也不占空间；
   往上划或加 `days=N` 才继续往前补（每次最多约 25 秒，补不完下次接着补）。同一条消息只存一份。
 - 媒体默认只有占位，请求 `/api/media/<id>` 才下载；缓存超过 30 天或 2GB 自动清理。
-- 发给 `tg:me`（收藏夹）直接发出；发给其他会话只写入草稿，网页上点两次确认后才发送，每条发送都有记录。
+- 发给 `tg:me`（收藏夹）和白名单里的会话直接发出（白名单在设置页从 Telegram 会话里选）；发给其他会话只写入草稿，网页上点两次确认后才发送，每条发送都有记录。
 - @BotFather 的会话对 agent 隐藏（里面有历史 bot token），也不能通过接口给它发消息。
 
 ## 和 agent 对话：一个 bot，一个话题群

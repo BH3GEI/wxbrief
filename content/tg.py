@@ -900,10 +900,19 @@ class Service:
 
     # -- sending
     def send_direct(self, chat, text):
-        """Saved Messages only. Everything else must be approved on the page."""
-        if chat != 'tg:me':
-            raise TGError('needs_approval', '只有发给收藏夹才能直接发送')
-        return self._send(chat, text, 'direct')
+        """Saved Messages and the chats on the user's allowlist. Everything else must be approved on the page."""
+        if chat != 'tg:me' and chat not in self.allowed():
+            raise TGError('needs_approval', '只有发给收藏夹或白名单里的会话才能直接发送')
+        return self._send(chat, text, 'direct' if chat == 'tg:me' else 'allowlist')
+
+    def allowed(self):
+        """Chats the user lets agents send to without approval (managed on the settings page)."""
+        return [c for c in self.config().get('allow', []) if is_tg(c) and c != 'tg:me']
+
+    def set_allowed(self, chats):
+        c = self.config()
+        c['allow'] = list(dict.fromkeys(x for x in chats if is_tg(x) and x != 'tg:me'))
+        _write(self.cfg_path, json.dumps(c))
 
     def send_approved(self, chat, text):
         if not is_tg(chat):

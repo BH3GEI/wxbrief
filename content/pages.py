@@ -530,9 +530,44 @@ def settings_page(K):
              f'<label class="sub">代理（盒子连不上 Telegram 时需要）</label><input name="proxy" placeholder="socks5://地址:端口，多个用逗号隔开，连不上时依次轮换" value="{e(st["proxy"])}">'
              '<button class="pri">保存</button></form></details></div>')
     out.append(''.join(t))
+    out.append(allow_settings())
     out.append(proxy_settings(st['proxy']))
     out.append(bots_settings())
     return page('设置', ''.join(out) + TWO_JS)
+
+def allow_settings():
+    """The allowlist: Telegram chats agents may send to directly, picked from the cached dialogs."""
+    from api import BOTFATHER
+    e = html.escape
+    allow = ctx.TGS.allowed()
+    c = db()
+    try:
+        dialogs = c.execute("select chat, name, kind from tg_dialogs where chat != 'tg:me' order by last_ts desc").fetchall()
+    finally:
+        c.close()
+    names = {d[0]: d[1] for d in dialogs}
+    kinds = {'u': '私聊', 'g': '群', 'c': '频道'}
+    out = ['<div class="sec" id="allow"><h3>直接发送白名单</h3>',
+           '<p class="sub">名单里的 Telegram 会话，agent 用 /api/send 发消息会直接发出，不再进草稿等你确认。其余会话照旧要确认。</p>']
+    if allow:
+        out.append('<ul>')
+        for ch in allow:
+            out.append(f'<li><b>{e(names.get(ch) or ch)}</b> <span class="sub">{e(ch)}</span> '
+                       f'<form class="inline" method="post" action="/tg/allow" style="display:inline"><input type="hidden" name="del" value="{e(ch)}">'
+                       '<button class="del">移除</button></form></li>')
+        out.append('</ul>')
+    else:
+        out.append('<p>名单是空的。</p>')
+    opts = ''.join(f'<option value="{e(d[0])}">{e(d[1] or d[0])}（{kinds.get(d[2], d[2] or "")}）</option>'
+                   for d in dialogs if d[0] not in allow and d[0] != BOTFATHER)
+    if opts:
+        out.append('<form method="post" action="/tg/allow"><select name="add">' + opts + '</select>'
+                   '<button class="pri" data-ask="再点一次：以后 agent 可以不经确认直接给它发消息">加入白名单</button></form>')
+    else:
+        out.append('<p class="sub">没有可加的会话（先登录 Telegram，会话列表同步后会出现在这里）。</p>')
+    out.append('</div>')
+    return ''.join(out)
+
 
 def proxy_settings(current):
     e = html.escape

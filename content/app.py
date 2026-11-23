@@ -259,7 +259,7 @@ def make_handler(K):
                 # because we bind to 127.0.0.1); /api/ is the public path and stays read-only.
                 if u.path not in ('/keys/create', '/keys/revoke', '/keys/reset', '/drafts/dismiss', '/capture/start', '/capture/cancel',
                                   '/tg/config', '/tg/login', '/tg/password', '/tg/logout', '/tg/send', '/refresh',
-                                  '/bots/config', '/bots/setup', '/proxy/config'):
+                                  '/bots/config', '/bots/setup', '/proxy/config', '/tg/allow'):
                     return self.send('not found', 404, 'text/plain')
                 # CSRF guard. Some webviews send neither header; the Lazycat login cookie is what really gates this.
                 origin = self.headers.get('Origin') or self.headers.get('Referer') or ''
@@ -301,6 +301,16 @@ def make_handler(K):
                             ctx.TGS.set_config(proxy=proxyctl.with_local(cur, True))
                             log('proxy: subscription saved')
                     return self.redirect('/settings#proxy')
+                if u.path == '/tg/allow':
+                    from api import BOTFATHER
+                    cur = ctx.TGS.allowed()
+                    add, rm = f.get('add', [''])[0].strip(), f.get('del', [''])[0].strip()
+                    if add and add != BOTFATHER:
+                        cur.append(add); log('allowlist: added', add)
+                    if rm:
+                        cur = [x for x in cur if x != rm]; log('allowlist: removed', rm)
+                    ctx.TGS.set_allowed(cur)
+                    return self.redirect('/settings#allow')
                 if u.path == '/tg/login':
                     ctx.TGS.login_qr(); return self.redirect('/settings')
                 if u.path == '/tg/password':

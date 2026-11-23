@@ -132,6 +132,7 @@ try:
     check('Telegram chat page works; ready media shown, others offer download', code == 200 and '看这张' in h and '/media/' in h)
     code, h = call('/settings', raw=True); h = h.decode()
     check('settings has WeChat key + Telegram sections', '密钥' in h and 'Telegram' in h and '连接设置' in h)
+    check('settings has the allowlist section with the chats to pick from', '直接发送白名单' in h and 'action="/tg/allow"' in h and 'value="tg:u7"' in h)
     check('settings has the built-in proxy section, off by default', '自带代理' in h and '未启用' in h and 'action="/proxy/config"' in h)
     check('settings never echoes api_hash or session', 'api_hash' in h and '"h"' not in h and 'value="h"' not in h)
     code, h = call('/keys', raw=True); h = h.decode()
@@ -145,6 +146,19 @@ try:
     code, _ = form('/tg/send', id=str(did)); check('approving twice does not send twice', len(fake.sent) == n + 1)
 
     # ---- refresh button + auto refresh
+    # ---- allowlist: chats agents may send to without approval
+    ctx.TGS.set_allowed(['tg:u7', 'tg:me', 'nonsense'])
+    check('allowlist keeps only Telegram chats other than Saved Messages', ctx.TGS.allowed() == ['tg:u7'])
+    n2 = len(fake.sent)
+    code, r = call('/api/send', 'POST', {'chat': 'tg:u7', 'text': '白名单直发'})
+    check('allowlisted chat: sent immediately, no draft', code == 200 and r['status'] == 'sent' and len(fake.sent) == n2 + 1 and fake.sent[-1][1] == '白名单直发', str(r))
+    ctx.TGS.set_allowed([])
+    code, r = call('/api/send', 'POST', {'chat': 'tg:u7', 'text': '移出后'})
+    check('removed from the allowlist: back to a draft', code == 200 and r['status'] == 'pending_approval' and len(fake.sent) == n2 + 1)
+    import api as _api; _api.draft_dismiss(r['draft_id'])
+    code, _ = form('/tg/allow', add='tg:u7'); check('settings page adds a chat to the allowlist', code == 303 and ctx.TGS.allowed() == ['tg:u7'])
+    code, _ = form('/tg/allow', add='tg:u93372553'); check('BotFather can never be allowlisted', ctx.TGS.allowed() == ['tg:u7'])
+    code, _ = form('/tg/allow', **{'del': 'tg:u7'}); check('settings page removes it', code == 303 and ctx.TGS.allowed() == [])
     import urllib.parse as up
     def post_form(path, **kv):
         return form(path, **kv)
