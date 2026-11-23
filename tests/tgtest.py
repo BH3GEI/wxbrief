@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Telegram service rules, against a fake adapter (no network, no Telethon calls)."""
-import os, sqlite3, sys, tempfile, time
+import os, shutil, sqlite3, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'content'))
@@ -226,6 +226,19 @@ try:
     check('state becomes ready after a call that needs a login (reads/sends)', (live._run(one(), 5, login=True), live.state)[1] == 'ready')
     live.state = 'qr'; live._run(one(), 5, login=True)
     check('a QR login in progress is not overwritten', live.state == 'qr')
+
+    # how files are shown when sent from the user account
+    check('pictures go as photos, big ones and svg as files', tg.file_kind('a.PNG', 100) == 'photo' and tg.file_kind('a.jpg', 11 << 20) == 'file' and tg.file_kind('a.svg', 10) == 'file')
+    check('mp4 goes as a video, others as files', tg.file_kind('v.mp4', 10) == 'video' and tg.file_kind('a.pdf', 10) == 'file')
+    check('unreadable video: zeros, no crash', tg.probe_video(b'junk')[:3] == (0, 0, 0))
+    if shutil.which('ffmpeg') and shutil.which('ffprobe'):
+        import subprocess
+        vt = tempfile.mkdtemp()
+        subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=10:duration=2',
+                        '-pix_fmt', 'yuv420p', vt + '/t.mp4'], check=True)
+        dur, w, h, thumb = tg.probe_video(open(vt + '/t.mp4', 'rb').read())
+        shutil.rmtree(vt)
+        check('ffprobe reads size and duration, ffmpeg makes a thumbnail', (w, h) == (320, 240) and 1.5 < dur < 2.5 and thumb and thumb[:2] == b'\xff\xd8')
 finally:
     import shutil; shutil.rmtree(tmp, ignore_errors=True)
 

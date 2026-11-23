@@ -2,15 +2,15 @@
 
 Nothing runs in the background. A chat is read from Telegram only when somebody asks for it (agent
 via the API, or the page), and cached in the same `msgs` table with a `tg:` chat id. We never mark
-anything as read. Sending: only to Saved Messages directly; every other chat goes through a draft
-that the user approves on the page.
+anything as read. Sending (text or a file): Saved Messages and the user's allowlist directly; every
+other chat goes through a draft that the user approves on the page.
 
 Chat ids: tg:me (Saved Messages), tg:u<id> user/bot, tg:g<id> group/supergroup, tg:c<id> channel.
 
 All Telethon calls live in `Live`; everything else talks to a small adapter interface, so tests use
 a fake adapter (tests/tgtest.py).
 """
-import asyncio, concurrent.futures, io, json, mimetypes, os, re, shutil, threading, time
+import asyncio, concurrent.futures, io, json, mimetypes, os, re, shutil, subprocess, tempfile, threading, time
 
 TTL = 60               # seconds a chat/dialog list stays fresh before it is read again
 IDLE = 60              # disconnect from Telegram after this many idle seconds
@@ -18,6 +18,7 @@ MEDIA_DAYS = 30        # cached media older than this is removed
 MEDIA_MAX = 2 << 30    # and the cache never grows beyond 2 GB
 FETCH_MAX = 500        # most messages read from Telegram in one call
 FIRST = 200            # a chat read for the first time: this many newest messages; older ones on request
+SEND_FILE_MAX = 50 * 1024 * 1024   # files sent from the user account (Telegram itself allows far more)
 BUDGET = 25            # seconds a request may spend filling a days= window before it returns what it has
 
 
@@ -446,6 +447,26 @@ class Live:
             m = await c.send_message(self._peer(ref), text)
             return m.id, int(m.date.timestamp())
         return self._run(go(), 30, login=True)
+
+    def send_file(self, ref, name, data, caption, kind, video=None):
+        """kind: 'photo' (shown as a picture), 'video' (plays inline; video = (duration, w, h, thumb jpeg or None))
+        or 'file'."""
+        async def go():
+            from telethon.tl import types
+            c = await self._client()
+            f = io.BytesIO(data); f.name = name
+            kw = {}
+            if kind == 'video':
+                dur, w, h, thumb = video or (0, 0, 0, None)
+                kw['supports_streaming'] = True
+                if w and h:
+                    kw['attributes'] = [types.DocumentAttributeVideo(duration=dur, w=w, h=h, supports_streaming=True)]
+                if thumb:
+                    t = io.BytesIO(thumb); t.name = 'thumb.jpg'
+                    kw['thumb'] = t
+            m = await c.send_file(self._peer(ref), f, caption=caption or None, force_document=(kind == 'file'), **kw)
+            return m.id, int(m.date.timestamp())
+        return self._run(go(), 600, login=True)
 
     def download(self, ref, msg_id, destdir):
         """Download into destdir (Telethon names the file); returns the path or None."""
@@ -914,6 +935,36 @@ class Service:
         c['allow'] = list(dict.fromkeys(x for x in chats if is_tg(x) and x != 'tg:me'))
         _write(self.cfg_path, json.dumps(c))
 
+    def send_file(self, chat, name, data, text=''):
+        """A picture, an mp4 (plays inline) or any file, to Saved Messages or an allowlisted chat only."""
+        if chat != 'tg:me' and chat not in self.allowed():
+            raise TGError('needs_approval', '只有收藏夹和白名单里的会话能直接发文件')
+        name = re.sub(r'[\\/\x00-\x1f]', '_', os.path.basename((name or '').strip())) or 'file'
+        if not data:
+            raise TGError('empty', '文件是空的')
+        if len(data) > SEND_FILE_MAX:
+            raise TGError('too_long', f'文件最大 {SEND_FILE_MAX >> 20}MB')
+        text = (text or '').strip()[:1024]
+        kind = file_kind(name, len(data))
+        video = probe_video(data) if kind == 'video' else None
+        c = self.db()
+        try:
+            ref = self._ref(c, chat)
+            cname = (c.execute('select name from tg_dialogs where chat=?', (chat,)).fetchone() or ['Saved Messages'])[0]
+        finally:
+            c.close()
+        mid, ts = self._call(self.adapter.send_file, ref, name, data, text, kind, video)
+        body = (text + ' ' if text else '') + {'photo': '[图片]', 'video': '[视频]'}.get(kind, '[文件]') + ' ' + name
+        c = self.db()
+        try:
+            c.execute('insert into tg_sent(ts, chat, chat_name, body, via) values(?,?,?,?,?)',
+                      (ts, chat, cname, body, 'direct' if chat == 'tg:me' else 'allowlist'))
+            c.commit()
+        finally:
+            c.close()
+        self.log('telegram: sent file', kind, len(data), 'to', chat)
+        return {'status': 'sent', 'chat': chat, 'message_id': mid, 'ts': ts, 'kind': kind}
+
     def send_approved(self, chat, text):
         if not is_tg(chat):
             raise TGError('bad_chat', '不是 Telegram 会话')
@@ -947,6 +998,49 @@ class Service:
             return [dict(r) for r in c.execute('select * from tg_sent order by id desc limit ?', (n,))]
         finally:
             c.close()
+
+
+def file_kind(name, size):
+    """How a file is shown in Telegram: pictures as photos (Telegram takes up to 10 MB), mp4 as a playable video."""
+    low = name.lower()
+    if low.endswith(('.jpg', '.jpeg', '.png', '.webp')) and size <= 10 * 1024 * 1024:
+        return 'photo'
+    if low.endswith(('.mp4', '.m4v')):
+        return 'video'
+    return 'file'
+
+
+def probe_video(data):
+    """(duration, width, height, thumbnail jpeg) via ffprobe/ffmpeg; zeros/None for what can't be read.
+    Without width/height Telegram shows the video as a 1x1 box."""
+    dur, w, h, thumb = 0, 0, 0, None
+    d = tempfile.mkdtemp(prefix='tgsend')
+    try:
+        src = os.path.join(d, 'v.mp4')
+        with open(src, 'wb') as f:
+            f.write(data)
+        try:
+            r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+                                'stream=width,height:format=duration', '-of', 'json', src],
+                               capture_output=True, timeout=30)
+            j = json.loads(r.stdout or b'{}')
+            st = (j.get('streams') or [{}])[0]
+            w, h = int(st.get('width') or 0), int(st.get('height') or 0)
+            dur = float((j.get('format') or {}).get('duration') or 0)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        try:
+            out = os.path.join(d, 't.jpg')
+            subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', str(min(1.0, dur / 2)), '-i', src, '-frames:v', '1',
+                            '-vf', 'scale=320:320:force_original_aspect_ratio=decrease', '-q:v', '4', out],
+                           capture_output=True, timeout=30)
+            if os.path.isfile(out) and os.path.getsize(out) < 200 * 1024:
+                thumb = open(out, 'rb').read()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return dur, w, h, thumb
 
 
 def _safe(name):

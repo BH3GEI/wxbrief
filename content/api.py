@@ -235,7 +235,7 @@ def agent_line(base, key, which='all'):
          '应用会自己从 Telegram 现查，第一次默认只拉最近 200 条（&limit= 最多 500）；要更早的加 &days=N 补齐最近 N 天'
          '（消息多时一次补不完，再调一次接着补），找很早的某句话用 /api/search?q=…&source=telegram&live=1；&live=0 只看缓存。图片/文件/语音默认只有占位，'
          '请求 GET /api/media/消息ID 时才会下载（media.status 是 not_downloaded 或 ready）。'
-         'GET /api/contacts?source=telegram 查通讯录（含没聊过的人，不含手机号）。发消息：POST /api/send，JSON {chat, text}；发给 tg:me（我的收藏夹）和我设的白名单里的会话会直接发出，发给别人只会放进草稿，等我在页面上确认。'
+         'GET /api/contacts?source=telegram 查通讯录（含没聊过的人，不含手机号）。发消息：POST /api/send，JSON {chat, text}；发给 tg:me（我的收藏夹）和我设的白名单里的会话会直接发出，发给别人只会放进草稿，等我在页面上确认。发文件给 tg:me 和白名单会话：POST /api/send_file {chat, name, data: base64, text}（图片显示为图，mp4 可直接播放，最大 50MB）。'
          '被限流时返回 {error: rate_limited, retry_after: 秒}，请等待后再试。你的读取不会标记已读。'
          '想直接和我对话：POST /api/bots {purpose: 这次任务的用途（20 字内，和会话目的相关）} 开一个话题（会话ID 形如 tgbot:123），'
          '用 POST /api/send 通过它发给我（直接推到我手机），用 GET /api/wait?chat=它&after_id=上次的id 等我回复（只返回我的消息）；'
@@ -311,6 +311,10 @@ GET /api/messages?chat=tg:...&limit=200[&days=N]
     chat 在我设的白名单里（设置页「直接发送白名单」）：立即发出，返回 {"status":"sent", message_id, ts}。
     chat 是别的 Telegram 会话：不会发出，放进草稿，返回 {"status":"pending_approval", draft_id}；我在页面上点两次确认后才会发送。
     微信会话：返回 wechat_send_unsupported（微信只读）。
+发文件：POST /api/send_file  {chat: "tg:me" 或白名单里的会话ID, name: "图.png", data: "<base64>", text: "可选说明"}（JSON）
+    用我的账号直接发出，返回 {"status":"sent", message_id, ts, kind}。最大 50MB；text 是说明文字（最多 1024 字）。
+    按 name 的扩展名决定显示方式：.jpg/.jpeg/.png/.webp（10MB 以内）按图片显示（kind=photo）；.mp4/.m4v 按视频显示，可直接播放（kind=video）；其他按文件发（kind=file）。
+    只能发给 tg:me 和白名单里的会话；别的会话返回 unknown_chat（文件没有草稿，要发给别人请让我自己发）。
 搜索：/api/search 默认只能搜到已经读取过的会话。要搜 Telegram 的全部历史，加 live=1：GET /api/search?q=关键词&source=telegram&live=1（可加 &chat=tg:… 限定会话）。
     live=1 直接向 Telegram 搜，只返回 Telegram 的结果，不存库；每条有 message_id、chat、chat_name、ts、sender、text。想看上下文，再用 /api/messages 读那个会话。同样的搜索 60 秒内重复请求会直接用上次的结果。
 通讯录：source=telegram 返回你通讯录里的人（含没聊过的），带 username（@用户名）；不返回手机号。has_chat 表示是否已有对话。q= 也能按 @用户名搜。
@@ -326,7 +330,7 @@ POST /api/bots   {purpose: 用途}（JSON）
 GET /api/bots    所有话题：status（open/closed）、holder、purpose、last_activity、mine（是不是你开的）。
 POST /api/send   {chat: "tgbot:话题号", text}  在你开的话题里发给我，立即发出，返回 {"status":"sent", id}。只有开这个话题的 key 能发。text 按 Markdown 显示（Telegram 富文本消息：表格、$公式$、标题、列表、引用、代码块都原样排版），最多 32768 字。
     可加 buttons：按行的按钮，[[{"text": "Opus", "data": "/cc_model opus"}, ...], ...]（也可以直接写字符串）。我点了按钮，就等于我发了一条内容为 data 的消息（data 最多 64 字节）。
-POST /api/send_file  {chat: "tgbot:话题号", name: "图.png", data: "<base64>", text: "可选说明"}  在你的话题里发图片（直接显示）或任意文件给我，最大 20MB。
+POST /api/send_file  {chat: "tgbot:话题号", name: "图.png", data: "<base64>", text: "可选说明"}  在你的话题里发图片（直接显示）或任意文件给我，最大 20MB。（发到 tg:me 和白名单会话见上面【Telegram】的「发文件」，最大 50MB。）
     我在话题里发的图片和文件：消息里有 media.url，GET 它（带同样的 Authorization）就能下载原件。
 POST /api/edit   {chat: "tgbot:话题号", id, text}  改你在这个话题里发过的一条消息（id 是发送时返回的）。用来边写边显示：先发一条，再不停改它；改得太勤会被限流，隔一两秒改一次。也可以带 buttons。
 POST /api/react  {chat: "tgbot:话题号", id, emoji}  给我发的一条消息加一个表情，例如 👀 表示看到了；emoji 为空就去掉。只能用 Telegram 允许的表情。

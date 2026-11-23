@@ -10,17 +10,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor'))
 import base64
 import runenv, ctx, wxdb, media, apikeys, keys as keymod, tg, tgbot, proxyctl
-from api import api, api_send, draft_create, draft_dismiss, draft_get, draft_list, help_text, tg_reply, wait_new
+from api import BOTFATHER, api, api_send, draft_create, draft_dismiss, draft_get, draft_list, help_text, tg_reply, wait_new
 from ctx import STATE, VAR, WECHAT, db, init_store, log
 from pages import base_url, chat, do_refresh, home, keys_page, older_page, page, ping_version, settings_page, sync_part, tg_home, tgsearch_page
 from wechat import VOICES, account_dir, ingest_loop
 
 
 # Request body limits. Bodies are always read whole; anything bigger is refused with 413, never cut short.
-SEND_FILE_MAX = 28 * 1024 * 1024    # POST /api/send_file: base64 of a file up to ~20 MB
+SEND_FILE_MAX = 70 * 1024 * 1024    # POST /api/send_file: base64 of a file up to 50 MB (bot topics stay at 20 MB)
 JSON_MAX = 4 * 1024 * 1024          # other JSON endpoints (100 menu commands or a 32768-char message as \uXXXX fit easily)
 FORM_MAX = 1024 * 1024              # web page forms (/tg/send text etc.)
-DRAIN_MAX = 64 * 1024 * 1024        # oversized bodies up to this are drained before answering 413
+DRAIN_MAX = 96 * 1024 * 1024        # oversized bodies up to this are drained before answering 413
 
 
 class BodyError(Exception):
@@ -228,13 +228,18 @@ def make_handler(K):
                     if f is None:
                         return err
                     if u.path == '/api/send_file':
-                        if not (ctx.BOTS and tgbot.is_bot(f.get('chat', ''))):
-                            raise tg.TGError('unknown_chat', '只能发到你用 POST /api/bots 开的话题里')
+                        to = (f.get('chat') or '').strip()
+                        bot = bool(ctx.BOTS and tgbot.is_bot(to))
+                        if not bot and not (tg.is_tg(to) and to != BOTFATHER and (to == 'tg:me' or to in ctx.TGS.allowed())):
+                            raise tg.TGError('unknown_chat', '只能发到你用 POST /api/bots 开的话题、收藏夹 tg:me，或设置页直接发送白名单里的 Telegram 会话')
                         try:
                             raw = base64.b64decode(f.get('data') or '', validate=True)
                         except Exception:
                             raise tg.TGError('bad_file', 'data 要是 base64')
-                        res = ctx.BOTS.send_file(key, f.get('chat', ''), f.get('name', ''), raw, f.get('text', ''))
+                        if bot:
+                            res = ctx.BOTS.send_file(key, to, f.get('name', ''), raw, f.get('text', ''))
+                        else:
+                            res = ctx.TGS.send_file(to, f.get('name', ''), raw, f.get('text', ''))
                     elif u.path == '/api/send':
                         res = api_send(f.get('chat', ''), f.get('text', ''), f.get('note', ''), key, f.get('buttons'))
                     elif u.path in ('/api/edit', '/api/react'):
@@ -302,7 +307,6 @@ def make_handler(K):
                             log('proxy: subscription saved')
                     return self.redirect('/settings#proxy')
                 if u.path == '/tg/allow':
-                    from api import BOTFATHER
                     cur = ctx.TGS.allowed()
                     add, rm = f.get('add', [''])[0].strip(), f.get('del', [''])[0].strip()
                     if add and add != BOTFATHER:

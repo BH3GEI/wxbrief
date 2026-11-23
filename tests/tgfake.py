@@ -7,7 +7,7 @@ import tg
 class Fake:
     """Implements the adapter interface used by tg.Service."""
     def __init__(self):
-        self.on_session = None; self.sent = []; self.calls = []; self.flood = 0; self.st = 'ready'
+        self.on_session = None; self.sent = []; self.files = []; self.calls = []; self.flood = 0; self.st = 'ready'
         now = int(time.time())
         self.msgs = {('u', 7): [dict(id=i, ts=now - 3600 * i, sender='小明', text=f'msg{i}', media=None, name='') for i in (3, 2, 1)]}
         self.msgs[('u', 7)].insert(0, dict(id=4, ts=now - 60, sender='小明', text='看这张', media='img', name=''))
@@ -73,6 +73,8 @@ class Fake:
         self.calls.append('contacts')
         return [('tg:u7', '小明', 'xiaoming', 111), ('tg:u50', '没聊过的人', 'nochat', 222)]
     def send(self, ref, text): self.sent.append((ref, text)); return 99, int(time.time())
+    def send_file(self, ref, name, data, caption, kind, video=None):
+        self.files.append((ref, name, len(data), caption, kind, video)); return 98, int(time.time())
     def download(self, ref, mid, destdir):
         self.calls.append(('download', mid))
         p = os.path.join(destdir, 'photo_2026.jpg'); open(p, 'wb').write(b'x' * 10); return p

@@ -32,6 +32,7 @@ GET  /api/wait?after_id=&chat=&source=&timeout=                          # 等�
 GET  /api/contacts?q=&source=&kind=&type=
 GET  /api/media/<消息id>[?thumb=1][&format=silk]
 POST /api/send     {"chat", "text", "note"}    # 收藏夹、自己领的 bot、白名单里的会话直接发出；其他 Telegram 会话进草稿
+POST /api/send_file {"chat", "name", "data", "text"}  # base64 文件：自己的话题（20MB）或收藏夹/白名单会话（用户账号，50MB；图片显示为图，mp4 可直接播放）
 POST /api/drafts   {"chat", "body", "note"}    # 建议回复（微信用这个，由本人复制）
 GET  /api/drafts[?chat=]      DELETE /api/drafts/<id>
 GET  /api/bots     POST /api/bots {"purpose"}     POST /api/bots/release {"chat"}
@@ -51,6 +52,7 @@ GET  /api/status   GET /api/help
   往上划或加 `days=N` 才继续往前补（每次最多约 25 秒，补不完下次接着补）。同一条消息只存一份。
 - 媒体默认只有占位，请求 `/api/media/<id>` 才下载；缓存超过 30 天或 2GB 自动清理。
 - 发给 `tg:me`（收藏夹）和白名单里的会话直接发出（白名单在设置页从 Telegram 会话里选）；发给其他会话只写入草稿，网页上点两次确认后才发送，每条发送都有记录。
+  文件（`/api/send_file`）同样只能直接发给收藏夹和白名单里的会话，文件没有草稿。
 - @BotFather 的会话对 agent 隐藏（里面有历史 bot token），也不能通过接口给它发消息。
 
 ## 和 agent 对话：一个 bot，一个话题群

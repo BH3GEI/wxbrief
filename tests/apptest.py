@@ -159,6 +159,26 @@ try:
     code, _ = form('/tg/allow', add='tg:u7'); check('settings page adds a chat to the allowlist', code == 303 and ctx.TGS.allowed() == ['tg:u7'])
     code, _ = form('/tg/allow', add='tg:u93372553'); check('BotFather can never be allowlisted', ctx.TGS.allowed() == ['tg:u7'])
     code, _ = form('/tg/allow', **{'del': 'tg:u7'}); check('settings page removes it', code == 303 and ctx.TGS.allowed() == [])
+    # ---- send_file from the user account: Saved Messages and the allowlist only
+    import base64 as b64
+    def sf(chat, name, data=b'IMG', text=''):
+        return call('/api/send_file', 'POST', {'chat': chat, 'name': name, 'data': b64.b64encode(data).decode(), 'text': text})
+    code, r = sf('tg:me', 'chart.png', text='图表')
+    check('file to Saved Messages: sent as a photo with the caption', code == 200 and r['kind'] == 'photo' and fake.files[-1][0] == ('me', 0, None) and fake.files[-1][3] == '图表', str(r))
+    code, r = sf('tg:me', 'report.pdf'); check('other files go as documents', code == 200 and r['kind'] == 'file')
+    code, r = sf('tg:u7', 'a.png'); nf = len(fake.files)
+    check('not allowlisted: file refused, nothing sent, no draft', code == 404 and r['error'] == 'unknown_chat' and nf == 2, str(r))
+    ctx.TGS.set_allowed(['tg:u7'])
+    code, r = sf('tg:u7', 'clip.mp4', b'not really a video')
+    check('allowlisted chat: mp4 goes as a video', code == 200 and r['kind'] == 'video' and fake.files[-1][0][:2] == ('u', 7) and fake.files[-1][4] == 'video', str(r))
+    check('sent log records the file', ctx.TGS.sent_log()[0]['body'] == '[视频] clip.mp4' and ctx.TGS.sent_log()[0]['via'] == 'allowlist')
+    code, r = sf('tg:u7', 'big.bin', b'x' * (50 * 1024 * 1024 + 1))
+    check('over 50 MB refused', code == 400 and r['error'] == 'too_long', str(code) + str(r)[:200])
+    code, r = sf('tg:u7', 'ok.bin', b'x' * (25 * 1024 * 1024))
+    check('25 MB is fine from the user account', code == 200 and fake.files[-1][2] == 25 * 1024 * 1024, str(code))
+    ctx.TGS.set_allowed([])
+    check('WeChat chats are refused', sf('wxid_a', 'a.png')[0] == 404)
+    check('help documents send_file for tg:me', 'send_file' in call('/api/help?for=all', raw=True)[1].decode() and '50MB' in call('/api/help?for=all', raw=True)[1].decode())
     import urllib.parse as up
     def post_form(path, **kv):
         return form(path, **kv)
