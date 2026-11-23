@@ -581,6 +581,17 @@ def proxy_settings(current):
         out.append(f'<p>运行中 · 当前节点 <b>{e(ps["node"])}</b>（{ps["delay"]} ms）· 可用 {ps["alive"]}/{ps["total"]} 个节点</p>')
     else:
         out.append(f'<p>正在启动或连不上（{e(ps["error"])}），几秒后刷新再看。</p>')
+    hs = tgbot.health(current)
+    if any(h['proxy'] != '直连' for h in hs):
+        word = {'ok': '可用', 'bad': '不可用', 'unknown': '未用过'}
+        items = []
+        for i, h in enumerate(hs, 1):
+            extra = f'，{h["ms"]} ms' if h['state'] == 'ok' and h['ms'] is not None else ''
+            if h['state'] == 'bad':
+                extra = f'，{e(h["err"])}，{h["retry_in"]} 秒后重试'
+            items.append(f'<li>{i}. <code>{e(h["proxy"])}</code> · {word[h["state"]]}{extra}</li>')
+        out.append('<p class="sub">Telegram 代理按顺序优先使用，不可用的先跳过，后台每 15 秒检查一次，恢复后自动用回：</p>'
+                   '<ul class="sub">' + ''.join(items) + '</ul>')
     if ps['enabled'] and proxyctl.LOCAL not in (current or ''):
         out.append('<p class="err">Telegram 代理里没有自带代理，保存一次订阅即可加回去。</p>')
     out.append('<form method="post" action="/proxy/config">'

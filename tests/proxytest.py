@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Proxy rotation for the Bot API (tgbot._open): several proxies in the setting, a dead one is skipped,
-the one that worked is tried first next time, a call that breaks after connecting moves on to the next proxy.
-Also tg.parse_proxy with several proxies. No network: _Conn.connect is replaced.
+"""Proxy failover for the Bot API (tgbot): several proxies in the setting, used in the listed order; a failing one
+is skipped within the same call and paused, the background probe brings it back; a call that breaks before the
+request went out moves on at once, after it went out only read-only calls are repeated.
+Also tg.parse_proxy with several proxies. No network: the _Conn methods are replaced.
 
 Run from the repo root:  python3 tests/proxytest.py
 """
@@ -11,8 +12,19 @@ sys.path.insert(0, os.path.join(HERE, '..', 'content', 'vendor'))
 sys.path.insert(0, os.path.join(HERE, '..', 'content'))
 import tgbot, tg  # noqa: E402
 
+import json, time  # noqa: E402
+
 tried = []
-dead = set()
+dead = set()          # handshake fails
+send_dead = set()     # connects, then the request fails while sending
+read_dead = set()     # request goes out, the response never comes
+sent_to = []          # (proxy, path) of every request that went out
+
+
+class FakeResp:
+    status = 200
+    def __init__(self, body): self.body = body
+    def read(self): return self.body
 
 
 def fake_connect(self):
@@ -21,8 +33,24 @@ def fake_connect(self):
         raise ConnectionRefusedError('dead')
 
 
+def fake_request(self, verb, path, body=None, headers=None):
+    if self._proxy in send_dead:
+        raise BrokenPipeError('send')
+    sent_to.append((self._proxy, path.rsplit('/', 1)[-1]))
+
+
+def fake_getresponse(self):
+    if self._proxy in read_dead:
+        raise TimeoutError('read')
+    return FakeResp(json.dumps({'ok': True, 'result': self._proxy}).encode())
+
+
 tgbot._Conn.connect = fake_connect
+tgbot._Conn.request = fake_request
+tgbot._Conn.getresponse = fake_getresponse
+tgbot._Conn.close = lambda self: None
 S = 'socks5://a:1, socks5://b:2 socks5://c:3'
+A, B, C = 'socks5://a:1', 'socks5://b:2', 'socks5://c:3'
 ok = fail = 0
 
 
@@ -32,34 +60,90 @@ def check(name, cond):
     ok, fail = ok + bool(cond), fail + (not cond)
 
 
-check('split', tgbot.proxies(S) == ['socks5://a:1', 'socks5://b:2', 'socks5://c:3'])
+def reset():
+    tgbot._HEALTH.clear()
+    tried.clear(); sent_to.clear(); dead.clear(); send_dead.clear(); read_dead.clear()
+
+
+def call(method='sendMessage'):
+    return tgbot.bot_call('T', method, {}, S)
+
+
+check('split', tgbot.proxies(S) == [A, B, C])
 check('empty = direct', tgbot.proxies('') == [''])
+check('label hides the password', tgbot.label('socks5://u:secret@h:1') == 'socks5://h:1' and tgbot.label('') == '直连')
 
-dead = {'socks5://a:1'}
-c, k = tgbot._open(S, 30)
-check('dead first proxy is skipped', k == 1 and tried == ['socks5://a:1', 'socks5://b:2'])
+reset()
+check('all fine: the first is used', call() == A and tried == [A])
 
+reset(); dead.add(A)
+r = call()
+check('dead first proxy is skipped within the same call', r == B and tried == [A, B])
 tried.clear()
-c, k = tgbot._open(S, 30)
-check('the proxy that worked goes first', k == 1 and tried == ['socks5://b:2'])
+r = call()
+check('a failing proxy is paused: the next call does not wait for it', r == B and tried == [B])
+h = tgbot.health(S)
+check('health: first bad with a pause, second ok', h[0]['state'] == 'bad' and h[0]['retry_in'] > 0 and h[1]['state'] == 'ok'
+      and h[2]['state'] == 'unknown')
 
+dead.clear(); tried.clear()
+tgbot._probe_once(S)
+check('probe waits for the pause to end', tried == [] and tgbot.health(S)[0]['state'] == 'bad')
+tgbot._HEALTH[A]['until'] = time.time() - 1
+tgbot._probe_once(S)
+check('probe after the pause: recovered', tried == [A] and tgbot.health(S)[0]['state'] == 'ok')
 tried.clear()
-tgbot._failed(S, k)
-c, k = tgbot._open(S, 30)
-check('after a broken call the next proxy goes first', k == 2 and tried == ['socks5://c:3'])
+check('recovered preferred proxy is used again', call() == A and tried == [A])
 
-tried.clear()
-dead = {'socks5://a:1', 'socks5://b:2', 'socks5://c:3'}
+reset(); dead.add(A); call()
+tgbot._HEALTH[A]['until'] = time.time() - 1
+tgbot._probe_once(S)
+check('probe failing again: pause grows', tgbot._HEALTH[A]['fails'] == 2 and tgbot._HEALTH[A]['until'] - time.time() > 50)
+
+reset(); send_dead.add(A)
+check('broken while sending: next proxy in the same call', call() == B and sent_to == [(B, 'sendMessage')])
+
+reset(); read_dead.add(A)
 try:
-    tgbot._open(S, 30)
-    check('all dead raises network', False)
+    call('sendMessage')
+    check('sent but no answer: a send is not repeated', False)
 except tg.TGError as e:
-    check('all dead raises network', e.code == 'network' and len(tried) == 3)
+    check('sent but no answer: a send is not repeated', e.code == 'network' and sent_to == [(A, 'sendMessage')])
+sent_to.clear()
+check('...and the next send goes through the next proxy', call('sendMessage') == B and sent_to == [(B, 'sendMessage')])
 
-tried.clear()
-dead = {'socks5://c:3'}
-c, k = tgbot._open(S, 30)
-check('wraps around to the first', k == 0 and tried == ['socks5://c:3', 'socks5://a:1'])
+reset(); read_dead.add(A)
+check('sent but no answer: a read-only call is repeated on the next proxy', call('getUpdates') == B
+      and sent_to == [(A, 'getUpdates'), (B, 'getUpdates')])
+reset(); read_dead.add(A)
+check('getFile download is repeated too', tgbot.bot_get_file('T', 'x', S) and sent_to[-1][0] == B)
+
+reset(); dead.update([A, B, C])
+try:
+    call()
+    check('all dead raises network, each tried once', False)
+except tg.TGError as e:
+    check('all dead raises network, each tried once', e.code == 'network' and sorted(tried) == [A, B, C] and len(tried) == 3)
+tried.clear(); dead.discard(A)
+tgbot._HEALTH[B]['until'] += 100; tgbot._HEALTH[C]['until'] += 200
+check('all paused: still tried, soonest-back first', call() == A and tried == [A])
+
+reset(); dead.update([A, B]); send_dead.add(C)
+try:
+    call()
+    check('every proxy fails somewhere: one error, no proxy tried twice', False)
+except tg.TGError:
+    check('every proxy fails somewhere: one error, no proxy tried twice', sorted(tried) == [A, B, C])
+
+logged = []
+tgbot._LOG[0] = lambda tag, msg: logged.append(msg)
+reset(); dead.add('socks5://u:pw@a:1')
+tgbot.bot_call('T', 'getMe', {}, 'socks5://u:pw@a:1, socks5://b:2')
+check('logs the switch once, without the password', len(logged) == 1 and 'pw' not in logged[0] and 'a:1' in logged[0])
+dead.clear(); tgbot._HEALTH['socks5://u:pw@a:1']['until'] = 0
+tgbot._probe_once('socks5://u:pw@a:1, socks5://b:2')
+check('logs the recovery', len(logged) == 2 and '恢复' in logged[1])
+tgbot._LOG[0] = None
 
 check('parse_proxy: first of several', tg.parse_proxy(S) == ('socks5', 'a', 1))
 check('parse_proxy: single', tg.parse_proxy('socks5://u:p@h:9') == ('socks5', 'h', 9, True, 'u', 'p'))

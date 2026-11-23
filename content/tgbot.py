@@ -49,53 +49,180 @@ class _Conn(http.client.HTTPSConnection):
         self.sock.settimeout(self.timeout)
 
 
-CONNECT_TIMEOUT = 10
-_GOOD = {}    # proxy setting -> index of the proxy in it that worked last
+CONNECT_TIMEOUT = 8      # proxy handshake + TLS; the healthy proxies answer in about a second
+COOL_MIN, COOL_MAX = 30, 600
+PROBE_EVERY = 15
+# Methods that are safe to send twice: a call that broke after the request went out is repeated through the
+# next proxy right away. Anything else (send*, edit*, createForumTopic…) is not repeated once sent, since
+# Telegram may already have done it; the caller sees a network error and decides.
+SAFE_RETRY = re.compile(r'^(get\w*|setMyName|setMyCommands|setMyDescription|setChatMenuButton)$')
+
+_HLOCK = threading.Lock()
+_HEALTH = {}     # proxy -> {'fails', 'until', 'err', 'ok_at', 'ms'}
+_LOG = [None]
 
 
 def proxies(setting):
-    """The proxy setting may list several proxies (comma or space separated); '' means a direct connection."""
+    """The proxy setting may list several proxies (comma or space separated); '' means a direct connection.
+    The order is the preference: the first one that works is used."""
     return [p for p in re.split(r'[\s,]+', setting or '') if p] or ['']
 
 
-def _open(setting, timeout):
-    """A connected _Conn. Tries the proxies in turn, starting with the one that worked last."""
+def label(p):
+    """A proxy for logs and pages: without user:password."""
+    return re.sub(r'//[^@/]*@', '//', p) if p else '直连'
+
+
+def _bad(p):
+    h = _HEALTH.get(p)
+    return bool(h and h['fails'])
+
+
+def _order(setting):
+    """Proxies in the order to try: the working ones in the listed order, then the failing ones,
+    the one whose pause ends first leading (all failing still means: try them all)."""
     ps = proxies(setting)
-    start, last = _GOOD.get(setting, 0) % len(ps), None
-    for i in range(len(ps)):
-        k = (start + i) % len(ps)
-        conn = _Conn(ps[k], timeout)
+    with _HLOCK:
+        good = [p for p in ps if not _bad(p)]
+        bad = sorted((p for p in ps if _bad(p)), key=lambda p: _HEALTH[p]['until'])
+    return good + bad
+
+
+def _mark_ok(p, ms=None):
+    with _HLOCK:
+        h = _HEALTH.setdefault(p, {'fails': 0, 'until': 0, 'err': '', 'ok_at': 0, 'ms': None})
+        was_bad = h['fails'] > 0
+        h.update(fails=0, until=0, err='', ok_at=time.time())
+        if ms is not None:
+            h['ms'] = ms
+    if was_bad and _LOG[0]:
+        _LOG[0]('telegram proxy', f'{label(p)} 恢复')
+
+
+def _mark_bad(p, e):
+    with _HLOCK:
+        h = _HEALTH.setdefault(p, {'fails': 0, 'until': 0, 'err': '', 'ok_at': 0, 'ms': None})
+        h['fails'] += 1
+        pause = min(COOL_MAX, COOL_MIN * 2 ** min(h['fails'] - 1, 10))
+        h['until'], h['err'] = time.time() + pause, type(e).__name__
+        first = h['fails'] == 1
+    if first and _LOG[0]:
+        _LOG[0]('telegram proxy', f'{label(p)} 不可用（{type(e).__name__}），先用其他代理')
+
+
+def health(setting):
+    """[{proxy (no password), state ok|bad|unknown, err, ms, until}] in the listed order, for the settings page."""
+    now = time.time()
+    out = []
+    with _HLOCK:
+        for p in proxies(setting):
+            h = _HEALTH.get(p)
+            st = 'unknown' if not h else ('bad' if h['fails'] else 'ok')
+            out.append({'proxy': label(p), 'state': st, 'err': (h or {}).get('err', ''), 'ms': (h or {}).get('ms'),
+                        'retry_in': max(0, int(h['until'] - now)) if st == 'bad' else 0})
+    return out
+
+
+def _open(setting, timeout, tried=None):
+    """A connected _Conn and its proxy: the first in _order, not yet in `tried`, that connects (proxy handshake
+    + TLS). Every proxy attempted is appended to `tried`."""
+    tried = [] if tried is None else tried
+    last = None
+    for p in _order(setting):
+        if p in tried:
+            continue
+        tried.append(p)
+        conn = _Conn(p, timeout)
+        t = time.monotonic()
         try:
             conn.connect()
-        except Exception as e:      # OSError, timeouts, python_socks errors: try the next proxy
+        except Exception as e:      # OSError, timeouts, python_socks and ssl errors: try the next proxy
             conn.close()
+            _mark_bad(p, e)
             last = e
             continue
-        _GOOD[setting] = k
-        return conn, k
-    raise TGError('network', f'连不上 Telegram Bot API：{type(last).__name__}，请检查代理')
+        _mark_ok(p, int((time.monotonic() - t) * 1000))
+        return conn, p
+    raise _net_error(last or OSError('no proxy left'))
 
 
-def _failed(setting, k):
-    """A call broke after connecting: the next call starts with the next proxy."""
-    _GOOD[setting] = k + 1
+def _request(setting, timeout, verb, path, body=None, headers=None, safe=False):
+    """(status, body bytes). Every proxy is tried at most once: a failure before the request is fully sent
+    moves on to the next proxy; after it was sent, only when `safe`."""
+    tried, last = [], None
+    while len(tried) < len(proxies(setting)):
+        conn, p = _open(setting, timeout, tried)
+        sent = False
+        try:
+            conn.request(verb, path, body, headers or {})
+            sent = True
+            r = conn.getresponse()
+            return r.status, r.read()
+        except (OSError, http.client.HTTPException) as e:
+            _mark_bad(p, e)
+            last = e
+            if sent and not safe:
+                raise _net_error(e)
+        finally:
+            conn.close()
+    raise _net_error(last or OSError('no proxy left'))
+
+
+def _probe_once(setting):
+    """Check the failing proxies whose pause is over (handshake + TLS only), so a recovered preferred proxy
+    is used again without a real call paying for the check."""
+    now = time.time()
+    with _HLOCK:
+        due = [p for p in proxies(setting) if _bad(p) and _HEALTH[p]['until'] <= now]
+    for p in due:
+        conn = _Conn(p, CONNECT_TIMEOUT)
+        t = time.monotonic()
+        try:
+            conn.connect()
+            _mark_ok(p, int((time.monotonic() - t) * 1000))
+        except Exception as e:
+            _mark_bad(p, e)
+        finally:
+            conn.close()
+
+
+_PROBER = []
+
+
+def start_prober(get_setting, log=None):
+    """One background thread per process that keeps the proxy health fresh."""
+    if log:
+        _LOG[0] = log
+    if _PROBER:
+        return
+    def run():
+        while True:
+            time.sleep(PROBE_EVERY)
+            try:
+                _probe_once(get_setting())
+            except Exception:
+                pass
+    t = threading.Thread(target=run, name='tg-proxy-probe', daemon=True)
+    _PROBER.append(t)
+    t.start()
 
 
 def _net_error(e):
     return TGError('network', f'连不上 Telegram Bot API：{type(e).__name__}，请检查代理')
 
 
+def _json(data):
+    try:
+        return json.loads(data or b'{}')
+    except ValueError as e:
+        raise _net_error(e)
+
+
 def bot_call(token, method, params=None, proxy='', timeout=30):
     """One Bot API call; returns `result` or raises TGError."""
-    conn, k = _open(proxy, timeout)
-    try:
-        conn.request('POST', f'/bot{token}/{method}', json.dumps(params or {}).encode(), {'Content-Type': 'application/json'})
-        d = json.loads(conn.getresponse().read() or b'{}')
-    except (OSError, socket.timeout, ValueError) as e:
-        _failed(proxy, k)
-        raise _net_error(e)
-    finally:
-        conn.close()
+    _, data = _request(proxy, timeout, 'POST', f'/bot{token}/{method}', json.dumps(params or {}).encode(),
+                       {'Content-Type': 'application/json'}, safe=bool(SAFE_RETRY.match(method)))
+    d = _json(data)
     if not d.get('ok'):
         if d.get('error_code') == 429:
             raise TGError('rate_limited', 'Telegram 限流，请稍后再试', int((d.get('parameters') or {}).get('retry_after') or 30))
@@ -105,19 +232,10 @@ def bot_call(token, method, params=None, proxy='', timeout=30):
 
 def bot_get_file(token, path, proxy='', timeout=120):
     """Download a file the Bot API points to (getFile → file_path)."""
-    conn, k = _open(proxy, timeout)
-    try:
-        conn.request('GET', f'/file/bot{token}/{path}')
-        r = conn.getresponse()
-        data = r.read()
-        if r.status != 200:
-            raise TGError('not_available', f'Telegram 没给文件（{r.status}）')
-        return data
-    except (OSError, socket.timeout) as e:
-        _failed(proxy, k)
-        raise _net_error(e)
-    finally:
-        conn.close()
+    status, data = _request(proxy, timeout, 'GET', f'/file/bot{token}/{path}', safe=True)
+    if status != 200:
+        raise TGError('not_available', f'Telegram 没给文件（{status}）')
+    return data
 
 
 def bot_upload(token, method, fields, field, name, data, proxy='', timeout=120):
@@ -130,15 +248,9 @@ def bot_upload(token, method, fields, field, name, data, proxy='', timeout=120):
     safe = name.replace('"', '')
     parts.append(f'--{b}\r\nContent-Disposition: form-data; name="{field}"; filename="{safe}"\r\nContent-Type: {mime}\r\n\r\n'.encode() + data + b'\r\n')
     body = b''.join(parts) + f'--{b}--\r\n'.encode()
-    conn, k = _open(proxy, timeout)
-    try:
-        conn.request('POST', f'/bot{token}/{method}', body, {'Content-Type': f'multipart/form-data; boundary={b}'})
-        d = json.loads(conn.getresponse().read() or b'{}')
-    except (OSError, socket.timeout, ValueError) as e:
-        _failed(proxy, k)
-        raise _net_error(e)
-    finally:
-        conn.close()
+    _, d = _request(proxy, timeout, 'POST', f'/bot{token}/{method}', body,
+                    {'Content-Type': f'multipart/form-data; boundary={b}'})
+    d = _json(d)
     if not d.get('ok'):
         raise TGError('telegram_error', str(d.get('description') or d)[:200])
     return d['result']
@@ -815,6 +927,7 @@ class Bots:
     def listen(self):
         if not self.autolisten or (self.listener and self.listener.is_alive()):
             return
+        start_prober(self.proxy, self.log)
         self.listener = threading.Thread(target=self._listen, daemon=True)
         self.listener.start()
 
