@@ -60,6 +60,7 @@ class Live:
         self.qr = None
         self.qr_url = ''
         self.last = time.time()
+        self.busy = 0              # calls in flight: never disconnect under a running upload
         self.err = ''
         self.on_session = None     # callback(session_string) to persist the login
         self.lock = threading.RLock()
@@ -69,6 +70,8 @@ class Live:
     def _run(self, coro, timeout=30, login=False):
         """login=True marks calls that only succeed for a logged-in account (reads, sends)."""
         self.last = time.time()
+        with self.lock:            # the idle disconnect checks busy under the same lock
+            self.busy += 1
         fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
         try:
             res = fut.result(timeout)
@@ -82,6 +85,10 @@ class Live:
             raise
         except Exception as e:
             raise self._wrap(e)
+        finally:
+            with self.lock:
+                self.busy -= 1
+            self.last = time.time()     # idle counts from the end of a call, not its start
 
     @staticmethod
     def _wrap(e):
@@ -133,9 +140,10 @@ class Live:
         while True:
             time.sleep(15)
             try:
-                if (self.client is not None and self.state in ('ready', 'logged_out') and
-                        time.time() - self.last > IDLE and self.client.is_connected()):
-                    self._run(self.client.disconnect(), 10)
+                with self.lock:
+                    if (self.client is not None and self.state in ('ready', 'logged_out') and not self.busy and
+                            time.time() - self.last > IDLE and self.client.is_connected()):
+                        asyncio.run_coroutine_threadsafe(self.client.disconnect(), self.loop).result(10)
             except Exception:
                 pass
 
@@ -464,9 +472,53 @@ class Live:
                 if thumb:
                     t = io.BytesIO(thumb); t.name = 'thumb.jpg'
                     kw['thumb'] = t
+            if kind != 'photo' and len(data) > 1024 * 1024:
+                f = await self._upload_parallel(c, data, name)
+                if kind == 'file':
+                    kw['attributes'] = [types.DocumentAttributeFilename(name)]
+                    kw['mime_type'] = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+                else:
+                    kw['mime_type'] = 'video/mp4'
+                    kw.setdefault('attributes', []).append(types.DocumentAttributeFilename(name))
             m = await c.send_file(self._peer(ref), f, caption=caption or None, force_document=(kind == 'file'), **kw)
             return m.id, int(m.date.timestamp())
-        return self._run(go(), 600, login=True)
+        try:
+            return self._run(go(), 600, login=True)
+        except TGError as e:
+            if e.code in ('telegram_error', 'network', 'timeout'):    # a half-finished upload can leave the connection stuck
+                try:
+                    self._run(self._drop(), 10)
+                except Exception:
+                    pass
+            raise
+
+    @staticmethod
+    async def _upload_parallel(c, data, name, part=512 * 1024, width=8):
+        """Telethon uploads one 512 KB part at a time, so a video crawls along at one part per round trip through
+        the proxy; Telegram takes the parts in any order, so keep several in flight."""
+        import hashlib, random
+        from telethon.tl import functions, types
+        fid, n = random.getrandbits(63), (len(data) + part - 1) // part
+        big = len(data) > 10 * 1024 * 1024
+        gate = asyncio.Semaphore(width)
+
+        async def one(i):
+            chunk = data[i * part:(i + 1) * part]
+            req = (functions.upload.SaveBigFilePartRequest(fid, i, n, chunk) if big
+                   else functions.upload.SaveFilePartRequest(fid, i, chunk))
+            async with gate:
+                for attempt in range(3):
+                    try:
+                        if await c(req):
+                            return
+                    except (ConnectionError, OSError, asyncio.TimeoutError):
+                        if attempt == 2:
+                            raise
+                raise TGError('telegram_error', f'Telegram 没有收下第 {i + 1}/{n} 块')
+        await asyncio.gather(*(one(i) for i in range(n)))
+        if big:
+            return types.InputFileBig(fid, n, name)
+        return types.InputFile(fid, n, name, hashlib.md5(data).hexdigest())
 
     def download(self, ref, msg_id, destdir):
         """Download into destdir (Telethon names the file); returns the path or None."""
@@ -953,7 +1005,12 @@ class Service:
             cname = (c.execute('select name from tg_dialogs where chat=?', (chat,)).fetchone() or ['Saved Messages'])[0]
         finally:
             c.close()
-        mid, ts = self._call(self.adapter.send_file, ref, name, data, text, kind, video)
+        t0 = time.time()
+        try:
+            mid, ts = self._call(self.adapter.send_file, ref, name, data, text, kind, video)
+        except TGError as e:
+            self.log('telegram: send file failed', kind, len(data), 'to', chat, f'after {time.time() - t0:.0f}s:', e.code, e.msg)
+            raise
         body = (text + ' ' if text else '') + {'photo': '[图片]', 'video': '[视频]'}.get(kind, '[文件]') + ' ' + name
         c = self.db()
         try:
@@ -962,7 +1019,7 @@ class Service:
             c.commit()
         finally:
             c.close()
-        self.log('telegram: sent file', kind, len(data), 'to', chat)
+        self.log('telegram: sent file', kind, len(data), 'to', chat, f'in {time.time() - t0:.0f}s')
         return {'status': 'sent', 'chat': chat, 'message_id': mid, 'ts': ts, 'kind': kind}
 
     def send_approved(self, chat, text):
