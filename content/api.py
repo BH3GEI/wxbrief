@@ -229,7 +229,7 @@ def agent_line(base, key, which='all'):
     """The paragraph you paste to an agent: one for WeChat, one for Telegram, one for both."""
     auth = f'地址 {base} ，每个请求加请求头 Authorization: Bearer {key} ；先 GET {base}/api/help?for={which} 看完整用法。'
     wx = ('微信（只读）：GET /api/chats?source=wechat 列会话，GET /api/messages?chat=会话ID&since=秒级时间戳 取消息，'
-          'GET /api/search?q=关键词 搜索，GET /api/contacts?source=wechat 查通讯录（含没聊过的人），消息里有 media.url 的用 GET /api/media/消息ID 下载图片/视频/文件/语音原件。'
+          'GET /api/search?q=关键词 搜索，GET /api/contacts?source=wechat 查通讯录（含没聊过的人），消息里有 media.url 的用 GET /api/media/消息ID 下载图片/视频/文件/语音原件（同名文件发过多次时按消息时间取对应那份；取不准时响应头带 X-Brief-Warning: same-name-file-uncertain，请提醒我核对版本）。'
           '写完建议回复：POST /api/drafts，JSON {chat: 会话ID, body: 文本}，我会在页面上复制或忽略；你不会代发微信消息。')
     t = ('Telegram：GET /api/chats?source=telegram 列出我所有的会话（会话ID 形如 tg:u123）；GET /api/messages?chat=会话ID 取消息，'
          '应用会自己从 Telegram 现查，第一次默认只拉最近 200 条（&limit= 最多 500）；要更早的加 &days=N 补齐最近 N 天'

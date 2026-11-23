@@ -104,7 +104,11 @@ def make_handler(K):
                 data, mime, name = ctx.TGS.media_file(mid)      # downloads from Telegram on first request
                 how = 'file'
             else:
-                how, data, mime, name = media.fetch(STATE['acc'], r['chat'], r['res'], ctx.IK, thumb)
+                how, data, mime, name = media.fetch(STATE['acc'], r['chat'], r['res'], ctx.IK, thumb, r['ts'] if 'ts' in r.keys() else None)
+            # several files share this name and the copy could not be tied to this message for certain
+            unsure = bool(name) and name.endswith(media.UNSURE)
+            if unsure:
+                name = name[:-len(media.UNSURE)]
             if how is None:
                 return self.send(json.dumps({'error': data}, ensure_ascii=False), 404, 'application/json; charset=utf-8')
             from urllib.parse import quote
@@ -129,6 +133,8 @@ def make_handler(K):
             else:
                 self.send_response(200)
             self.send_header('Content-Type', mime); self.send_header('Accept-Ranges', 'bytes')
+            if unsure:
+                self.send_header('X-Brief-Warning', 'same-name-file-uncertain')
             self.send_header('Content-Length', str(end - start + 1)); self.send_header('Content-Disposition', disp); self.sec_headers()
             self.end_headers()
             with open(data, 'rb') as f:

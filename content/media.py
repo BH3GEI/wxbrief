@@ -229,8 +229,35 @@ def availability(acc, chat, res):
         return 'full' if n and _first(f'{acc}/msg/file/*/{glob.escape(n)}') else None
     return None
 
-def fetch(acc, chat, res, ik, thumb=False):
-    """-> ('bytes', data, mime, filename) | ('path', path, mime, filename) | (None, reason, None, None)."""
+UNSURE = '\x00unsure'
+
+def _same_name(acc, n):
+    """Every copy WeChat keeps of a file name: name.ext and, for later files with the same name, name(1).ext, name(2).ext…"""
+    stem, ext = os.path.splitext(n)
+    out = glob.glob(f'{acc}/msg/file/*/{glob.escape(n)}')
+    out += [p for p in glob.glob(f'{acc}/msg/file/*/{glob.escape(stem)}(*){glob.escape(ext)}')
+            if re.fullmatch(re.escape(stem) + r'\(\d+\)' + re.escape(ext), os.path.basename(p))]
+    return out
+
+def pick_file(cands, ts):
+    """The copy that belongs to a message sent at ts (unix seconds): the first one written after it arrived (WeChat
+    saves a file when it gets it). -> (path, sure). Without ts, or with nothing after it, the newest; sure only when
+    there is a single copy or one written within 10 minutes of the message."""
+    if not cands:
+        return None, False
+    by_time = sorted(cands, key=os.path.getmtime)
+    if len(cands) == 1:
+        return cands[0], True
+    if ts:
+        after = [p for p in by_time if os.path.getmtime(p) >= ts - 120]
+        if after:
+            return after[0], os.path.getmtime(after[0]) <= ts + 600
+    return by_time[-1], False
+
+def fetch(acc, chat, res, ik, thumb=False, ts=None):
+    """-> ('bytes', data, mime, filename) | ('path', path, mime, filename) | (None, reason, None, None).
+    For a file that several messages share the name of, the copy is chosen by the message time (ts); when that is not
+    certain, the filename returned ends with UNSURE (the caller strips it and warns)."""
     if not acc or not res:
         return None, 'no media', None, None
     kind, _, ref = res.partition(':')
@@ -268,11 +295,11 @@ def fetch(acc, chat, res, ik, thumb=False):
         return None, '视频未下载到微信', None, None
     if kind == 'file':
         n = _safe_name(ref)
-        p = n and _first(f'{acc}/msg/file/*/{glob.escape(n)}')
+        p, sure = pick_file(_same_name(acc, n), ts) if n else (None, False)
         if not p or not os.path.realpath(p).startswith(os.path.realpath(acc + '/msg/file') + '/'):
             return None, '文件未下载到微信', None, None
         import mimetypes
-        return 'path', p, mimetypes.guess_type(n)[0] or 'application/octet-stream', n
+        return 'path', p, mimetypes.guess_type(n)[0] or 'application/octet-stream', n if sure else n + UNSURE
     return None, 'no media', None, None
 
 
